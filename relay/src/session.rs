@@ -25,6 +25,9 @@ use crate::{App, unix_millis};
 
 const SESSION: &str = "relay_session";
 const LOGIN: &str = "relay_login";
+/// How long an admin's tenant connection is used before their ID token is
+/// exchanged again.
+const ADMIN_RECHECK_SECS: u64 = 300;
 /// A sign-in that takes longer than this starts over.
 const LOGIN_TTL_SECS: u64 = 600;
 
@@ -33,7 +36,7 @@ const LOGIN_TTL_SECS: u64 = 600;
 #[derive(Default)]
 pub(crate) struct Sessions {
     endpoints: OnceCell<Endpoints>,
-    /// By ID token and tenant, until the ID token expires.
+    /// By ID token and tenant, until the next check with the control plane.
     tenants: Mutex<Opened>,
 }
 
@@ -94,10 +97,13 @@ pub(crate) fn identity(app: &App, headers: &HeaderMap) -> Option<Identity> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
     {
-        let claims = claims(token).ok()?;
+        // The claims only name the admin on the page. Whether the token is
+        // genuine, and what it may do, is the control plane's answer to the
+        // exchange.
+        let name = claims(token).map_or_else(|_| "someone".to_string(), |c| display_name(&c));
         return Some(Identity {
             id_token: token.to_string(),
-            name: display_name(&claims),
+            name,
         });
     }
     let session: Session = open_cookie(app, headers, SESSION)?;
@@ -107,8 +113,9 @@ pub(crate) fn identity(app: &App, headers: &HeaderMap) -> Option<Identity> {
     })
 }
 
-/// The tenant's Felix connection for this admin, made the first time they
-/// open it and kept until their ID token expires.
+/// The tenant's Felix connection for this admin, made from the exchange the
+/// first time they open it and kept for a few minutes. Nothing here decides
+/// on the ID token's own claims: the control plane's answer does.
 pub(crate) async fn admin_tenant(
     app: &App,
     headers: &HeaderMap,
@@ -123,7 +130,9 @@ pub(crate) async fn admin_tenant(
     let id_token = who.id_token.clone();
     let key = (id_token.clone(), tenant.to_string());
     let now = unix_millis() / 1000;
-    if let Some((open, _)) = app.sessions.tenants.lock().unwrap().get(&key) {
+    if let Some((open, until)) = app.sessions.tenants.lock().unwrap().get(&key)
+        && *until > now
+    {
         return Ok((Arc::clone(open), who));
     }
     let http = reqwest::Client::new();
@@ -141,10 +150,9 @@ pub(crate) async fn admin_tenant(
         Ok(refused) => Denied::Forbidden(refused.to_string()),
         Err(err) => Denied::Unavailable(err),
     })?;
-    let exp = claims(&id_token)
-        .ok()
-        .and_then(|c| c["exp"].as_u64())
-        .unwrap_or(now);
+    // Kept briefly, then exchanged again, so the control plane decides
+    // afresh: a revoked role or an expired ID token ends access within this.
+    let exp = now + ADMIN_RECHECK_SECS;
     let provider = auth::exchanged_tokens(&app.config, tenant, &id_token, token);
     let opened = Tenant::open(&app.config, tenant, provider)
         .await

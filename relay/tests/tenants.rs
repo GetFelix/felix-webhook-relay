@@ -446,3 +446,103 @@ async fn admins_sign_in_and_others_are_refused_by_the_control_plane() {
         .unwrap();
     assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// `token` with its payload claims changed by `edit`, the signature left as
+/// it was, as someone forging a token would.
+fn tampered(token: &str, edit: impl FnOnce(&mut Value)) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let parts: Vec<&str> = token.split('.').collect();
+    let mut claims: Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+    edit(&mut claims);
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+    format!("{}.{payload}.{}", parts[0], parts[2])
+}
+
+#[tokio::test]
+#[ignore = "needs a Felix broker"]
+async fn a_tampered_token_is_refused_and_acts_on_nothing() {
+    let run = unique("forged");
+    let relay = Relay::start("admin", &[("RELAY_TENANTS", "acme,globex")]).await;
+    let alice = id_token(ALICE).await;
+    // Alice's real token is in use, so a cache keyed loosely would hand a
+    // forgery her connection.
+    let real = relay
+        .call_as(
+            ALICE,
+            TENANT,
+            Method::GET,
+            &format!("/sources/{run}"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(real.status(), StatusCode::NOT_FOUND);
+
+    let forgeries = [
+        (
+            "as bob, for globex",
+            tampered(&alice, |c| c["email"] = json!(BOB)),
+            GLOBEX,
+        ),
+        (
+            "as bob, for acme",
+            tampered(&alice, |c| c["email"] = json!(BOB)),
+            TENANT,
+        ),
+        (
+            "alice, longer lived",
+            tampered(&alice, |c| c["exp"] = json!(4_000_000_000u64)),
+            TENANT,
+        ),
+        (
+            "alice, another audience",
+            tampered(&alice, |c| c["aud"] = json!("felix-webhook-relay")),
+            TENANT,
+        ),
+    ];
+    for (what, token, tenant) in forgeries {
+        for (method, path) in [
+            (Method::GET, format!("/api/{tenant}/sources/{run}")),
+            (Method::PUT, format!("/api/{tenant}/sources/{run}")),
+        ] {
+            let response = relay
+                .http
+                .request(method.clone(), relay.url(&path))
+                .bearer_auth(&token)
+                .json(&json!({ "scheme": { "type": "token" } }))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            assert!(
+                status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN,
+                "{what}: {method} {path} -> {status}"
+            );
+        }
+        let page = relay
+            .http
+            .get(relay.url(&format!("/admin/{tenant}")))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(!page.contains("Signed in as"), "{what}: the page opened");
+    }
+    // Nothing was created in either tenant.
+    for (who, tenant) in [(ALICE, TENANT), (BOB, GLOBEX)] {
+        let shown = relay
+            .call_as(
+                who,
+                tenant,
+                Method::GET,
+                &format!("/sources/{run}"),
+                Value::Null,
+            )
+            .await;
+        assert_eq!(shown.status(), StatusCode::NOT_FOUND, "{tenant}");
+    }
+}
