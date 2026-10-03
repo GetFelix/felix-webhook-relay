@@ -27,6 +27,8 @@ const IDEM_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) fn routes() -> axum::Router<Arc<App>> {
     axum::Router::new()
         .route("/in/{tenant}/{source}", post(signed))
+        // The token is a secret. Nothing in the relay logs request paths, and
+        // nothing may start to: the tests check that it never reaches the log.
         .route("/in/{tenant}/{source}/{token}", post(with_token))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }

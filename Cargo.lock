@@ -417,6 +417,7 @@ dependencies = [
  "base64 0.22.1",
  "felix-client",
  "felix-relay-core",
+ "felix-wire",
  "hex",
  "hmac",
  "reqwest",

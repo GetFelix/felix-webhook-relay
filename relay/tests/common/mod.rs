@@ -5,7 +5,7 @@
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -43,13 +43,22 @@ pub fn now_secs() -> u64 {
 }
 
 /// Poll `check` until it returns something, or fail after [`WAIT`].
-pub async fn eventually<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
+pub async fn eventually<T>(what: &str, check: impl AsyncFnMut() -> Option<T>) -> T {
+    within(WAIT, what, check).await
+}
+
+/// Poll `check` until it returns something, or fail after `limit`.
+pub async fn within<T>(
+    limit: Duration,
+    what: &str,
+    mut check: impl AsyncFnMut() -> Option<T>,
+) -> T {
     let started = Instant::now();
     loop {
         if let Some(value) = check().await {
             return value;
         }
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
+        assert!(started.elapsed() < limit, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -63,6 +72,11 @@ pub struct Relay {
 
 impl Relay {
     pub async fn start(roles: &str, env: &[(&str, &str)]) -> Self {
+        Self::start_logging(roles, env, Stdio::inherit()).await
+    }
+
+    /// Like [`Relay::start`], with its log written to `log`.
+    pub async fn start_logging(roles: &str, env: &[(&str, &str)], log: Stdio) -> Self {
         let addr = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -71,11 +85,13 @@ impl Relay {
         command
             .env("RELAY_LISTEN", addr.to_string())
             .env("RELAY_ROLES", roles)
-            .env("RELAY_SECRET_KEY", SECRET_KEY);
+            .env("RELAY_SECRET_KEY", SECRET_KEY)
+            // Every test's group is new, so there are no earlier claims to wait out.
+            .env("RELAY_CLAIM_WAIT_MS", "0");
         for (name, value) in env {
             command.env(name, value);
         }
-        let child = command.spawn().expect("start felix-relay");
+        let child = command.stdout(log).spawn().expect("start felix-relay");
         let mut relay = Self {
             child,
             addr,
@@ -167,6 +183,8 @@ impl Drop for Relay {
 pub struct Received {
     pub headers: HeaderMap,
     pub body: Bytes,
+    /// What the endpoint answered.
+    pub status: StatusCode,
 }
 
 impl Received {
@@ -179,7 +197,7 @@ impl Received {
     }
 }
 
-type Reply = Arc<dyn Fn(usize, &HeaderMap) -> StatusCode + Send + Sync>;
+type Reply = Arc<dyn Fn(usize, &Received) -> StatusCode + Send + Sync>;
 
 /// An HTTP endpoint that records every request.
 #[derive(Clone)]
@@ -196,21 +214,38 @@ impl Endpoint {
 
     /// Answers with `reply(requests received before this one, headers)`.
     pub async fn replying(
-        reply: impl Fn(usize, &HeaderMap) -> StatusCode + Send + Sync + 'static,
+        reply: impl Fn(usize, &Received) -> StatusCode + Send + Sync + 'static,
     ) -> Self {
-        type Shared = (Arc<Mutex<Vec<Received>>>, Reply);
+        Self::replying_after(Duration::ZERO, reply).await
+    }
+
+    /// Like [`Endpoint::replying`], taking `delay` over every answer.
+    pub async fn replying_after(
+        delay: Duration,
+        reply: impl Fn(usize, &Received) -> StatusCode + Send + Sync + 'static,
+    ) -> Self {
+        type Shared = (Arc<Mutex<Vec<Received>>>, Reply, Duration);
         async fn receive(
-            State((inbox, reply)): State<Shared>,
+            State((inbox, reply, delay)): State<Shared>,
             headers: HeaderMap,
             body: Bytes,
         ) -> StatusCode {
-            let mut inbox = inbox.lock().unwrap();
-            let status = reply(inbox.len(), &headers);
-            inbox.push(Received { headers, body });
+            let status = {
+                let mut inbox = inbox.lock().unwrap();
+                let mut received = Received {
+                    headers,
+                    body,
+                    status: StatusCode::OK,
+                };
+                received.status = reply(inbox.len(), &received);
+                inbox.push(received.clone());
+                received.status
+            };
+            tokio::time::sleep(delay).await;
             status
         }
         let inbox = Arc::new(Mutex::new(Vec::new()));
-        let shared: Shared = (Arc::clone(&inbox), Arc::new(reply));
+        let shared: Shared = (Arc::clone(&inbox), Arc::new(reply), delay);
         let router = axum::Router::new()
             .route("/hook", post(receive))
             .with_state(shared);
@@ -308,4 +343,53 @@ pub async fn tail(stream: &str) -> u64 {
         .await
         .unwrap();
     subscription.live_offset().expect("a live offset")
+}
+
+/// Every record in `stream` from the start that `keep` returns something
+/// for, once there are at least `count` of them.
+pub async fn read_stream<T>(
+    stream: &str,
+    count: usize,
+    keep: impl Fn(&[u8]) -> Option<T>,
+) -> Vec<T> {
+    let felix = felix().await;
+    let mut subscription = felix
+        .subscribe_from("relay", TENANT, stream, Some(StartPosition::Earliest))
+        .await
+        .unwrap();
+    let mut kept = Vec::new();
+    while kept.len() < count {
+        let event = tokio::time::timeout(WAIT, subscription.next_event())
+            .await
+            .unwrap_or_else(|_| panic!("only {} matching records in {stream}", kept.len()))
+            .unwrap()
+            .expect("an open subscription");
+        kept.extend(keep(&event.payload));
+    }
+    kept
+}
+
+/// A JSON entry in the tenant's `state` cache.
+pub async fn state_entry(key: &str) -> Option<Value> {
+    let client = felix().await.client().await;
+    let value = client
+        .cache_get("relay", TENANT, "state", key)
+        .await
+        .unwrap()?;
+    Some(serde_json::from_slice(&value).unwrap())
+}
+
+/// The value of a counter on a relay's `/metrics`.
+pub async fn metric(relay: &Relay, name: &str) -> u64 {
+    let metrics = reqwest::get(relay.url("/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    metrics
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{name} ")))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("no {name} in /metrics"))
 }

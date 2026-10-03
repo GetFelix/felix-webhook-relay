@@ -49,6 +49,17 @@ pub struct Endpoint {
     /// The secret before the last rotation, which also signs until `until`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_secret: Option<PreviousSecret>,
+    /// Set by the endpoint's worker when it gives up on the endpoint, and
+    /// cleared by an operator. Its records wait in the log meanwhile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<Disabled>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Disabled {
+    pub reason: String,
+    /// Unix milliseconds.
+    pub at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

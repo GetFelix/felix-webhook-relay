@@ -20,6 +20,8 @@ pub(crate) struct Metrics {
     pub(crate) poll_wakeup: Histogram,
     /// One request to the endpoint, from sending to its answer.
     pub(crate) outbound: Histogram,
+    /// Group polls sent. A paused endpoint sends none.
+    pub(crate) polls: AtomicU64,
 }
 
 impl Metrics {
@@ -40,6 +42,13 @@ impl Metrics {
             "relay_outbound_request_seconds",
             "One delivery request to an endpoint, send to response.",
         );
+        let _ = writeln!(
+            out,
+            "# HELP relay_group_polls_total Consumer group polls sent."
+        );
+        let _ = writeln!(out, "# TYPE relay_group_polls_total counter");
+        let polls = self.polls.load(Ordering::Relaxed);
+        let _ = writeln!(out, "relay_group_polls_total {polls}");
         out
     }
 }
