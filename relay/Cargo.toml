@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+hex = "0.4"
 felix-client = "0.6.0-preview"
 felix-relay-core.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
@@ -22,3 +23,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+standardwebhooks = "1"
+base64.workspace = true
+hmac = "0.12"
+sha2 = "0.10"
+

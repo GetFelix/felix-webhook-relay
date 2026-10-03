@@ -1,11 +1,13 @@
 //! The delivery task for one endpoint: poll its group, send each record in
-//! order, acknowledge it once the endpoint answers `2xx`.
+//! order, signed, and acknowledge it once the endpoint answers `2xx`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use felix_relay_core::Envelope;
+use felix_relay_core::catalog::{Endpoint, endpoint_key};
+use felix_relay_core::signature::standard_signature;
 use reqwest::header::CONTENT_TYPE;
 
 use crate::{App, unix_millis};
@@ -20,16 +22,16 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 pub(crate) async fn run(app: Arc<App>) -> Result<()> {
-    let felix = app.felix.as_ref().context("deliver runs with Felix")?;
-    let config = &app.config;
-    let url = config.endpoint_url.as_deref().context("no endpoint URL")?;
-    let stream = config.source_stream();
-    let group = config.endpoint_group();
+    let felix = &app.felix;
+    let endpoint_id = &app.config.endpoint;
+    let source = current(&app, endpoint_id).await?.source;
+    let stream = format!("src.{source}");
+    let group = format!("ep.{endpoint_id}");
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)
         .build()?;
-    tracing::info!(%stream, %group, %url, "delivering");
+    tracing::info!(%stream, %group, "delivering");
 
     loop {
         // A new poll only once every record from the last one is settled.
@@ -62,8 +64,8 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
                 Ok(envelope) => {
                     let age = polled_at.saturating_sub(envelope.received_at);
                     app.metrics.poll_wakeup.record(Duration::from_millis(age));
-                    let id = envelope.event_id(&config.source, record.offset);
-                    send_until_accepted(&app, &http, url, &id, &envelope).await;
+                    let id = envelope.event_id(&source, record.offset);
+                    send_until_accepted(&app, &http, endpoint_id, &id, &envelope).await;
                 }
                 // Nothing can deliver it, and holding it would stop the endpoint.
                 Err(err) => tracing::error!(offset = record.offset, "skipping: {err}"),
@@ -92,31 +94,75 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
     }
 }
 
+/// The endpoint's config as it stands, waiting for it to exist.
+async fn current(app: &App, id: &str) -> Result<Endpoint> {
+    let mut catalog = app.catalog.clone();
+    loop {
+        if let Some(endpoint) = catalog.borrow_and_update().endpoints.get(id) {
+            return Ok(endpoint.clone());
+        }
+        tracing::info!(endpoint = %id, "waiting for the endpoint to be configured");
+        catalog
+            .changed()
+            .await
+            .context("the config watch stopped")?;
+    }
+}
+
 /// Send one event until the endpoint answers `2xx`. Retries are a fixed
 /// pause for now; backoff and dead letters replace them.
 async fn send_until_accepted(
     app: &App,
     http: &reqwest::Client,
-    url: &str,
+    endpoint_id: &str,
     id: &str,
     envelope: &Envelope,
 ) {
     loop {
-        let mut request = http
-            .post(url)
-            .header("webhook-id", id)
-            .body(envelope.body.clone());
-        if let Some(content_type) = &envelope.content_type {
-            request = request.header(CONTENT_TYPE, content_type);
-        }
-        let started = Instant::now();
-        let result = request.send().await;
-        app.metrics.outbound.record(started.elapsed());
-        match result {
-            Ok(response) if response.status().is_success() => return,
-            Ok(response) => tracing::warn!(%id, status = %response.status(), "endpoint refused"),
-            Err(err) => tracing::warn!(%id, "request failed: {err}"),
+        match send(app, http, endpoint_id, id, envelope).await {
+            Ok(status) if status.is_success() => return,
+            Ok(status) => tracing::warn!(%id, %status, "endpoint refused"),
+            Err(err) => tracing::warn!(%id, "request failed: {err:#}"),
         }
         tokio::time::sleep(RETRY_DELAY).await;
     }
+}
+
+/// One signed request, with the endpoint's config read afresh so a URL
+/// change or a secret rotation applies to the next attempt.
+async fn send(
+    app: &App,
+    http: &reqwest::Client,
+    endpoint_id: &str,
+    id: &str,
+    envelope: &Envelope,
+) -> Result<reqwest::StatusCode> {
+    let endpoint = current(app, endpoint_id).await?;
+    let now = unix_millis();
+    let timestamp = now / 1000;
+    let key = &app.config.secret_key;
+    let name = endpoint_key(endpoint_id);
+    let mut secrets = vec![key.open(&name, &endpoint.secret)?];
+    if let Some(previous) = endpoint.previous_secret.as_ref().filter(|p| p.until > now) {
+        secrets.push(key.open(&name, &previous.secret)?);
+    }
+    let signatures = secrets
+        .iter()
+        .map(|secret| standard_signature(secret, id, timestamp, &envelope.body))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(" ");
+
+    let mut request = http
+        .post(&endpoint.url)
+        .header("webhook-id", id)
+        .header("webhook-timestamp", timestamp.to_string())
+        .header("webhook-signature", signatures)
+        .body(envelope.body.clone());
+    if let Some(content_type) = &envelope.content_type {
+        request = request.header(CONTENT_TYPE, content_type);
+    }
+    let started = Instant::now();
+    let result = request.send().await;
+    app.metrics.outbound.record(started.elapsed());
+    Ok(result?.status())
 }

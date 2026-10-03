@@ -120,9 +120,11 @@ done
 
 # The broker runs as uid 65532 and writes its certificate here too.
 chmod 777 "$STATE"
+# Creating a source's stream goes through the control plane with this token.
+echo "$admin" >"$STATE/admin.token"
 exchange relay-broker '{"audience": "felix-controlplane"}' >"$STATE/node.token"
 exchange relay-service \
   '{"requested": ["stream.publish", "stream.subscribe", "cache.read", "cache.write"]}' \
   >"$STATE/relay.token"
-chmod 644 "$STATE/node.token" "$STATE/relay.token"
-echo "wrote node.token and relay.token to $STATE"
+chmod 644 "$STATE/node.token" "$STATE/relay.token" "$STATE/admin.token"
+echo "wrote node.token, relay.token and admin.token to $STATE"
