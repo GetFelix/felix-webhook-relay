@@ -241,6 +241,13 @@ Intake wraps each webhook in a MessagePack envelope before appending it:
 Felix's frame limit is 16 MiB (`FELIX_MAX_FRAME_BYTES`). Intake caps bodies
 at 1 MiB by default, which is above what the common senders send.
 
+The envelope is a MessagePack array in field order, not a map, so field names
+are not repeated in every record: a 1 KiB body with a typical id, type and two
+kept headers encodes in about 1,150 bytes. A field added later goes at the end
+with a default, so records already in the log still decode. An absent `id`
+is stored as nil, and every reader derives `<source>:<offset>` the same way
+(`Envelope::event_id` in `core`).
+
 ## Intake
 
 ```mermaid
@@ -262,6 +269,7 @@ sequenceDiagram
 2. **Check the idempotency key**, when the source has one. A hit answers `200` with the original offset and appends nothing.
 3. **Append with an idempotent producer.** Felix's idempotent producer numbers each batch, so intake's own retry of a publish whose ack was lost lands once, across a failover (`crates/sdk/felix-client/src/publish/idempotent.rs`; `docs/semantics.md`, "Idempotent producers"). It also returns the offset on every ack, so the relay does not need the broker-wide `FELIX_ACK_ON_COMMIT` ([felix#956](https://github.com/gabloe/felix/issues/956)).
 4. **Answer `202` only after the ack.** The ack is as durable as the broker's fsync policy (`docs/durable-storage.md`). The self-hosting guide recommends `FsyncMode::OnCommit`, where an ack means the bytes are on the device; group commit is what keeps that affordable.
+5. **Never cancel an append.** Dropping an idempotent publish after it was sent and before its answer ends the producer (`IdempotentProducer::publish_batch`), and an HTTP handler is dropped whenever the sender hangs up. So the append runs on its own task, and a sender that disconnects still gets its webhook stored. A failed append is re-sent with the same bytes a few times, which cannot duplicate it. If it still fails, intake answers `503` and starts a new producer: the old batch is in doubt, so the sender's retry can land a second copy, and the sender's id is what tells the two apart.
 
 **The idempotency check races.** Two copies of one webhook arriving at once
 can both miss in `idem` and both be appended, because there is no conditional
@@ -607,8 +615,19 @@ Set by what senders and receivers notice, not by Felix's ceilings.
 **Budget the hop.** Of the 50 ms accept-to-receipt target, Felix's own share
 is a millisecond or two in-region with fsync on commit. The rest is the
 group's poll wake-up, the HTTP request to the endpoint, and the endpoint
-itself. Instrument intake, the poll and the outbound request as separate
-histograms from M0, so the broker's share is a number, not a guess.
+itself. Intake, the poll and the outbound request are separate
+histograms on `/metrics`, so the broker's share is a number, not a guess:
+`relay_intake_ack_seconds` from starting an append to its ack,
+`relay_poll_wakeup_seconds` from `received_at` to the poll that hands the
+record out, and `relay_outbound_request_seconds` per request to an endpoint.
+The poll histogram uses intake's clock against the worker's, so across hosts
+it includes their clock skew.
+
+**Intake throughput needs batching.** An idempotent producer serialises its
+publishes to a stream, and intake has one producer per process, so today it
+appends one webhook per broker round trip. The 5,000 per second target needs
+concurrent webhooks gathered into one `publish_batch`, which takes one
+sequence whatever its size. That is M6 work; M0 appends one at a time.
 
 ## Build order
 
