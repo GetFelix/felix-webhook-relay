@@ -20,8 +20,9 @@ agreeing.
 
 Felix already has the pieces as one system. One durable stream per source
 holds every webhook. One consumer group per endpoint gives it its own cursor,
-acknowledgements, redelivery and dead letters. Replay is a subscription from
-an offset over the same log. An endpoint that is down for an hour costs
+acknowledgements and redelivery. What an endpoint keeps refusing goes to the
+relay's own dead-letter stream. Replay is a subscription from an offset over
+the same log. An endpoint that is down for an hour costs
 nothing while it waits: its backlog is the stretch of log its cursor has not
 reached yet.
 
