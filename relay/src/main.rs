@@ -1,6 +1,8 @@
 //! `felix-relay`: a webhook relay whose backend is Felix. One binary that runs
 //! as intake, delivery, admin, or any mix, picked by `RELAY_ROLES`.
 
+mod admin;
+mod catalog;
 mod config;
 mod deliver;
 mod felix;
@@ -16,6 +18,7 @@ use axum::extract::State;
 use axum::routing::get;
 use tracing_subscriber::EnvFilter;
 
+use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::felix::Felix;
 use crate::metrics::Metrics;
@@ -23,8 +26,9 @@ use crate::metrics::Metrics;
 /// What every role shares.
 pub(crate) struct App {
     pub(crate) config: Config,
-    /// `None` when only roles that do not touch Felix run.
-    pub(crate) felix: Option<Arc<Felix>>,
+    pub(crate) felix: Arc<Felix>,
+    /// Every source and endpoint, kept current from Felix.
+    pub(crate) catalog: tokio::sync::watch::Receiver<Arc<Catalog>>,
     pub(crate) metrics: Metrics,
 }
 
@@ -35,14 +39,12 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let felix = if config.roles.uses_felix() {
-        Some(Arc::new(Felix::connect(&config).await?))
-    } else {
-        None
-    };
+    let felix = Arc::new(Felix::connect(&config).await?);
+    let catalog = catalog::follow(Arc::clone(&felix)).await?;
     let app = Arc::new(App {
         config,
         felix,
+        catalog,
         metrics: Metrics::default(),
     });
     let roles = app.config.roles;
@@ -52,6 +54,9 @@ async fn main() -> Result<()> {
         .route("/metrics", get(metrics));
     if roles.intake {
         router = router.merge(intake::routes());
+    }
+    if roles.admin {
+        router = router.merge(admin::routes());
     }
     let router = router.with_state(Arc::clone(&app));
 

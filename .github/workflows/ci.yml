@@ -55,7 +55,7 @@ jobs:
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
           export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
-          cargo test --locked --test delivery -- --include-ignored --nocapture
+          cargo test --locked --tests -- --include-ignored
       - name: Felix logs
         if: failure()
         run: docker compose -f dev/docker-compose.yml logs
