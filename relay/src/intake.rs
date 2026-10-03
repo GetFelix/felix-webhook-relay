@@ -59,13 +59,13 @@ async fn accept(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(source) = (tenant == app.config.tenant)
-        .then(|| app.catalog.borrow().sources.get(&source_id).cloned())
-        .flatten()
-    else {
+    let Some((tenant, source)) = app.tenants.get(&tenant).and_then(|tenant| {
+        let source = tenant.catalog.borrow().sources.get(&source_id).cloned()?;
+        Some((tenant, source))
+    }) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let felix = &app.felix;
+    let felix = &tenant.felix;
     let header_value = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
 
     let secret = match app
@@ -85,7 +85,7 @@ async fn accept(
             .scheme
             .verify(&secret, header_value, token.as_deref(), &body, now / 1000)
     {
-        tracing::info!(source = %source_id, "refused: {refusal}");
+        tracing::info!(tenant = %tenant.name, source = %source_id, "refused: {refusal}");
         return (StatusCode::UNAUTHORIZED, refusal.to_string()).into_response();
     }
 
@@ -136,11 +136,12 @@ async fn accept(
     {
         Ok(offset) => offset,
         Err(err) => {
-            tracing::error!(source = %source_id, "could not store a webhook: {err:#}");
+            tracing::error!(tenant = %tenant.name, source = %source_id, "could not store a webhook: {err:#}");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
     app.metrics.intake_ack.record(started.elapsed());
+    felix.count(format!("received/{source_id}"));
     if let Some(key) = &idem_key
         && let Err(err) = felix
             .cache_put(IDEM, key, offset.to_string().into_bytes(), Some(IDEM_TTL))

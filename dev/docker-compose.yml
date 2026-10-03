@@ -1,6 +1,7 @@
-# Felix for local development and CI: a control plane, one broker, a stand-in
-# IdP, and a one-shot seed that creates the demo tenant's streams and caches
-# and the relay's token. `dev/up.sh` starts it and waits for the broker.
+# Felix for local development and CI: a control plane, one broker, Dex for
+# admins to sign in with, a stand-in IdP for the relay's own token, and a
+# one-shot seed that creates the relay tenants' namespaces, streams, caches
+# and roles. `dev/up.sh` starts it and waits for the broker and Dex.
 name: felix-webhook-relay
 
 services:
@@ -11,6 +12,14 @@ services:
     command: ["httpd", "-f", "-p", "9400", "-h", "/www"]
     volumes:
       - ./state/idp:/www:ro
+
+  dex:
+    image: ghcr.io/dexidp/dex:v2.44.0
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "127.0.0.1:5556:5556"
 
   controlplane:
     image: ghcr.io/gabloe/felix-controlplane:0.6.0-preview
@@ -31,6 +40,7 @@ services:
       - "127.0.0.1:8443:8443"
     depends_on:
       - idp
+      - dex
 
   seed:
     image: alpine:3.22

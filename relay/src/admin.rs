@@ -1,11 +1,13 @@
 //! The admin JSON API: sources and endpoints in the `config` cache, with
 //! their secrets sealed before they are written.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{FromRequestParts, Path, State};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
 use felix_relay_core::catalog::{
@@ -18,14 +20,19 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::auth::{self, MANAGE, Refused};
 use crate::catalog::CONFIG;
+use crate::session::{self, Denied, Identity};
+use crate::tenant::Tenant;
 use crate::{App, unix_millis};
 
 mod jobs;
+mod page;
 
 pub(crate) fn routes() -> axum::Router<Arc<App>> {
     axum::Router::new()
         .merge(jobs::routes())
+        .merge(page::routes())
         .route(
             "/api/{tenant}/sources/{id}",
             put(put_source).get(get_source).delete(delete_source),
@@ -64,16 +71,32 @@ fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "not found".to_string())
 }
 
-/// Checks the tenant and the id, and returns the entry's cache key.
-fn entry_key(
-    app: &App,
-    tenant: &str,
-    id: &str,
-    key: fn(&str) -> String,
-) -> Result<String, ApiError> {
-    if tenant != app.config.tenant {
-        return Err(not_found());
+/// The tenant an admin request is about, from the `{tenant}` in its path,
+/// opened with the admin's own token, and who the admin is.
+pub(crate) struct Admin(pub(crate) Arc<Tenant>, pub(crate) Identity);
+
+impl FromRequestParts<Arc<App>> for Admin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Self, ApiError> {
+        let Path(params) = Path::<HashMap<String, String>>::from_request_parts(parts, app)
+            .await
+            .map_err(|_| not_found())?;
+        let tenant = params.get("tenant").ok_or_else(not_found)?;
+        match session::admin_tenant(app, &parts.headers, tenant).await {
+            Ok((tenant, who)) => Ok(Admin(tenant, who)),
+            Err(Denied::SignedOut) => Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "sign in at /auth/login, or send an ID token as a bearer token".to_string(),
+            )),
+            Err(Denied::Forbidden(reason)) => Err(ApiError(StatusCode::FORBIDDEN, reason)),
+            Err(Denied::Unavailable(err)) => Err(err.into()),
+        }
     }
+}
+
+/// Checks the id, and returns the entry's cache key.
+fn entry_key(id: &str, key: fn(&str) -> String) -> Result<String, ApiError> {
     if !valid_id(id) {
         return Err(bad_request(
             "ids are 1 to 64 lowercase letters, digits, - and _",
@@ -82,16 +105,16 @@ fn entry_key(
     Ok(key(id))
 }
 
-async fn read<T: DeserializeOwned>(app: &App, key: &str) -> Result<Option<T>, ApiError> {
-    read_from(app, CONFIG, key).await
+async fn read<T: DeserializeOwned>(tenant: &Tenant, key: &str) -> Result<Option<T>, ApiError> {
+    read_from(tenant, CONFIG, key).await
 }
 
 async fn read_from<T: DeserializeOwned>(
-    app: &App,
+    tenant: &Tenant,
     cache: &str,
     key: &str,
 ) -> Result<Option<T>, ApiError> {
-    let Some(bytes) = app.felix.cache_get(cache, key).await? else {
+    let Some(bytes) = tenant.felix.cache_get(cache, key).await? else {
         return Ok(None);
     };
     let value = serde_json::from_slice(&bytes)
@@ -99,9 +122,9 @@ async fn read_from<T: DeserializeOwned>(
     Ok(Some(value))
 }
 
-async fn write(app: &App, key: &str, value: &impl serde::Serialize) -> Result<(), ApiError> {
+async fn write(tenant: &Tenant, key: &str, value: &impl serde::Serialize) -> Result<(), ApiError> {
     let bytes = serde_json::to_vec(value).expect("config serializes");
-    app.felix.cache_put(CONFIG, key, bytes, None).await?;
+    tenant.felix.cache_put(CONFIG, key, bytes, None).await?;
     Ok(())
 }
 
@@ -131,11 +154,15 @@ struct SourceInput {
 
 async fn put_source(
     State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, who): Admin,
+    Path((_, id)): Path<(String, String)>,
     Json(input): Json<SourceInput>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, source_key)?;
-    let existing: Option<Source> = read(&app, &key).await?;
+    let key = entry_key(&id, source_key)?;
+    let existing: Option<Source> = read(&tenant, &key).await?;
+    if existing.is_none() {
+        create_stream(&app, &who, &tenant, &format!("src.{id}")).await?;
+    }
     let (secret, generated) = match (input.secret, existing) {
         (Some(secret), _) => (app.config.secret_key.seal(&key, &secret), None),
         (None, Some(existing)) => (existing.secret, None),
@@ -167,7 +194,7 @@ async fn put_source(
             .map(|h| h.to_ascii_lowercase())
             .collect(),
     };
-    write(&app, &key, &source).await?;
+    write(&tenant, &key, &source).await?;
     let mut shown = shown(&id, &source);
     if let Some(secret) = generated {
         shown["secret"] = json!(secret);
@@ -175,21 +202,80 @@ async fn put_source(
     Ok(Json(shown).into_response())
 }
 
-async fn get_source(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
-) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, source_key)?;
-    let source: Source = read(&app, &key).await?.ok_or_else(not_found)?;
+/// Create a source's stream through the control plane, with the admin's
+/// token, and wait until the broker serves it. Felix creates streams only
+/// there; a client cannot.
+async fn create_stream(
+    app: &App,
+    who: &Identity,
+    tenant: &Tenant,
+    stream: &str,
+) -> Result<(), ApiError> {
+    let config = &app.config;
+    let http = reqwest::Client::new();
+    let token = auth::exchange(
+        &http,
+        config,
+        &who.id_token,
+        &tenant.name,
+        &MANAGE,
+        "felix-controlplane",
+    )
+    .await
+    .map_err(|err| match err.downcast::<Refused>() {
+        Ok(refused) => ApiError(StatusCode::FORBIDDEN, refused.to_string()),
+        Err(err) => err.into(),
+    })?;
+    let url = format!(
+        "{}/v1/tenants/{}/namespaces/{}/streams",
+        config.control_plane, config.felix_tenant, tenant.name
+    );
+    let response = http
+        .post(&url)
+        .bearer_auth(token)
+        .json(&json!({
+            "stream": stream,
+            "kind": "Stream",
+            "shards": 1,
+            "replication_factor": 1,
+            "retention": { "max_age_seconds": null, "max_size_bytes": null },
+            "consistency": "Leader",
+            "delivery": "AtLeastOnce",
+            "durable": true
+        }))
+        .send()
+        .await
+        .map_err(anyhow::Error::from)?;
+    let status = response.status();
+    if !status.is_success() && status != StatusCode::CONFLICT {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ApiError(status, format!("create {stream}: {body}")));
+    }
+    // Brokers learn of new streams on their next sync with the control plane.
+    for _ in 0..100 {
+        if tenant.felix.bounds(stream).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("{stream} was created but no broker serves it yet"),
+    ))
+}
+
+async fn get_source(Admin(tenant, _): Admin, Path((_, id)): Path<(String, String)>) -> ApiResult {
+    let key = entry_key(&id, source_key)?;
+    let source: Source = read(&tenant, &key).await?.ok_or_else(not_found)?;
     Ok(Json(shown(&id, &source)).into_response())
 }
 
 async fn delete_source(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id)): Path<(String, String)>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, source_key)?;
-    app.felix.cache_delete(CONFIG, &key).await?;
+    let key = entry_key(&id, source_key)?;
+    tenant.felix.cache_delete(CONFIG, &key).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -213,10 +299,11 @@ struct EndpointInput {
 
 async fn put_endpoint(
     State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id)): Path<(String, String)>,
     Json(input): Json<EndpointInput>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
+    let key = entry_key(&id, endpoint_key)?;
     if !valid_id(&input.source) {
         return Err(bad_request("source is not a valid id"));
     }
@@ -224,12 +311,12 @@ async fn put_endpoint(
         Ok(url) if matches!(url.scheme(), "http" | "https") => {}
         _ => return Err(bad_request("url must be an http or https URL")),
     }
-    let existing: Option<Endpoint> = read(&app, &key).await?;
+    let existing: Option<Endpoint> = read(&tenant, &key).await?;
     let disabled = existing.as_ref().and_then(|e| e.disabled.clone());
     let start_offset = match &existing {
         Some(existing) if existing.source == input.source => existing.start_offset,
         _ if input.backfill => 0,
-        _ => source_tail(&app, &input.source).await?,
+        _ => source_tail(&tenant, &input.source).await?,
     };
     let mut generated = None;
     let (secret, previous_secret) = match (input.secret, existing) {
@@ -259,7 +346,7 @@ async fn put_endpoint(
         start_offset,
         disabled,
     };
-    write(&app, &key, &endpoint).await?;
+    write(&tenant, &key, &endpoint).await?;
     let mut shown = shown(&id, &endpoint);
     if let Some(secret) = generated {
         shown["secret"] = json!(secret);
@@ -270,8 +357,8 @@ async fn put_endpoint(
 /// The offset the next webhook to the source will get. A new endpoint starts
 /// there, because a new Felix group starts at the beginning of the log and
 /// cannot be told otherwise.
-async fn source_tail(app: &App, source: &str) -> Result<u64, ApiError> {
-    let felix = &app.felix;
+async fn source_tail(tenant: &Tenant, source: &str) -> Result<u64, ApiError> {
+    let felix = &tenant.felix;
     let subscription = felix
         .client()
         .subscribe_from(
@@ -290,21 +377,18 @@ async fn source_tail(app: &App, source: &str) -> Result<u64, ApiError> {
     })
 }
 
-async fn get_endpoint(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
-) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
-    let endpoint: Endpoint = read(&app, &key).await?.ok_or_else(not_found)?;
+async fn get_endpoint(Admin(tenant, _): Admin, Path((_, id)): Path<(String, String)>) -> ApiResult {
+    let key = entry_key(&id, endpoint_key)?;
+    let endpoint: Endpoint = read(&tenant, &key).await?.ok_or_else(not_found)?;
     Ok(Json(shown(&id, &endpoint)).into_response())
 }
 
 async fn delete_endpoint(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id)): Path<(String, String)>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
-    app.felix.cache_delete(CONFIG, &key).await?;
+    let key = entry_key(&id, endpoint_key)?;
+    tenant.felix.cache_delete(CONFIG, &key).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -319,11 +403,12 @@ struct SecretInput {
 /// over without rejecting anything.
 async fn rotate_secret(
     State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id)): Path<(String, String)>,
     input: Option<Json<SecretInput>>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
-    let mut endpoint: Endpoint = read(&app, &key).await?.ok_or_else(not_found)?;
+    let key = entry_key(&id, endpoint_key)?;
+    let mut endpoint: Endpoint = read(&tenant, &key).await?.ok_or_else(not_found)?;
     let secret = match input.and_then(|Json(input)| input.secret) {
         Some(secret) => {
             Scheme::StandardWebhooks
@@ -341,18 +426,18 @@ async fn rotate_secret(
         ),
         until,
     });
-    write(&app, &key, &endpoint).await?;
+    write(&tenant, &key, &endpoint).await?;
     Ok(Json(json!({ "id": id, "secret": secret, "rotating_until": until })).into_response())
 }
 
 /// Clear a disabled endpoint. Its worker resumes from the group's cursor.
 async fn enable_endpoint(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id)): Path<(String, String)>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
-    let mut endpoint: Endpoint = read(&app, &key).await?.ok_or_else(not_found)?;
+    let key = entry_key(&id, endpoint_key)?;
+    let mut endpoint: Endpoint = read(&tenant, &key).await?.ok_or_else(not_found)?;
     endpoint.disabled = None;
-    write(&app, &key, &endpoint).await?;
+    write(&tenant, &key, &endpoint).await?;
     Ok(Json(shown(&id, &endpoint)).into_response())
 }

@@ -1,0 +1,35 @@
+# Dex, the identity provider admins sign in with on the development stack.
+# Three people, all with the password "password": alice administers acme,
+# bob administers globex, and carol administers nothing.
+issuer: http://127.0.0.1:5556/dex
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  skipApprovalScreen: true
+  # Lets scripts and tests get an ID token with a password, no browser.
+  passwordConnector: local
+expiry:
+  idTokens: 24h
+enablePasswordDB: true
+staticClients:
+  - id: relay-admin
+    name: Felix Webhook Relay
+    secret: dev-admin-secret
+    redirectURIs:
+      - http://127.0.0.1:8090/auth/callback
+      - http://127.0.0.1:18090/auth/callback
+staticPasswords:
+  - email: alice@example.com
+    username: alice
+    userID: "1"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+  - email: bob@example.com
+    username: bob
+    userID: "2"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+  - email: carol@example.com
+    username: carol
+    userID: "3"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"

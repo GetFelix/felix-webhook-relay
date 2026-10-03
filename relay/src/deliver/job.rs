@@ -26,10 +26,11 @@ const QUIET: Duration = Duration::from_secs(10);
 
 pub(super) async fn run(sender: Sender, id: String, mut job: Job) {
     job.status = JobStatus::Running;
-    save(&sender.app.felix, &id, &mut job).await;
+    save(&sender.tenant.felix, &id, &mut job).await;
     let result = match job.kind.clone() {
         JobKind::Replay { .. } => replay(&sender, &id, &mut job).await,
         JobKind::Redrive { dead_offset } => redrive(&sender, &id, &mut job, dead_offset).await,
+        JobKind::Retry => unreachable!("the endpoint's task takes retries"),
     };
     match result {
         Ok(()) => job.status = JobStatus::Done,
@@ -39,10 +40,10 @@ pub(super) async fn run(sender: Sender, id: String, mut job: Job) {
             job.error = Some(format!("{err:#}"));
         }
     }
-    save(&sender.app.felix, &id, &mut job).await;
+    save(&sender.tenant.felix, &id, &mut job).await;
 }
 
-async fn save(felix: &Felix, id: &str, job: &mut Job) {
+pub(super) async fn save(felix: &Felix, id: &str, job: &mut Job) {
     job.updated_at = unix_millis();
     let ttl = (!job.active()).then_some(KEEP_FINISHED);
     let json = serde_json::to_vec(job).expect("a job serializes");
@@ -68,7 +69,7 @@ async fn replay(sender: &Sender, id: &str, job: &mut Job) -> Result<()> {
     if next >= to {
         return Ok(());
     }
-    let felix = &sender.app.felix;
+    let felix = &sender.tenant.felix;
     let mut subscription = felix
         .client()
         .subscribe_from(
@@ -116,7 +117,7 @@ async fn replay(sender: &Sender, id: &str, job: &mut Job) -> Result<()> {
 }
 
 async fn redrive(sender: &Sender, id: &str, job: &mut Job, dead_offset: u64) -> Result<()> {
-    let felix = &sender.app.felix;
+    let felix = &sender.tenant.felix;
     let dead = read_dead_letter(felix, dead_offset).await?;
     if dead.endpoint != sender.endpoint {
         bail!(

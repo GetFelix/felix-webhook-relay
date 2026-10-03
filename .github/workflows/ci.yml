@@ -54,7 +54,6 @@ jobs:
       - name: Integration tests
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --tests -- --include-ignored
       - name: Felix logs
         if: failure()
@@ -80,21 +79,18 @@ jobs:
           RELAY_TEST_OUTAGE: 60s
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --test outage -- --include-ignored an_endpoint_that_was_down
       - name: Slow endpoint isolation, 1,000 webhooks
         env:
           RELAY_TEST_ISOLATION_WEBHOOKS: "1000"
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --test endpoints -- --include-ignored --nocapture a_slow_endpoint
       - name: Offset for a time, 10 million records
         env:
           RELAY_TEST_SEARCH_RECORDS: "10000000"
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --test replay -- --include-ignored --nocapture the_offset_for_a_time
       - name: Felix logs
         if: failure()

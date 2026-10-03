@@ -12,6 +12,7 @@ use felix_relay_core::records::{Attempt, DeadLetter, RESPONSE_SNIPPET_BYTES};
 use felix_relay_core::signature::standard_signature;
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 
+use crate::tenant::Tenant;
 use crate::{App, unix_millis};
 
 /// The pause before retrying a failed call to Felix.
@@ -35,6 +36,7 @@ pub(super) struct Answer {
 #[derive(Clone)]
 pub(super) struct Sender {
     pub(super) app: Arc<App>,
+    pub(super) tenant: Arc<Tenant>,
     pub(super) endpoint: String,
     pub(super) source: String,
     pub(super) http: reqwest::Client,
@@ -43,7 +45,7 @@ pub(super) struct Sender {
 impl Sender {
     /// The endpoint's config as it stands.
     pub(super) fn endpoint(&self) -> Result<Endpoint> {
-        self.app
+        self.tenant
             .catalog
             .borrow()
             .endpoints
@@ -148,7 +150,13 @@ impl Sender {
             status: answer.status,
             detail: answer.detail.clone(),
         };
-        let felix = Arc::clone(&self.app.felix);
+        let felix = Arc::clone(&self.tenant.felix);
+        let outcome = if answer.status.is_some_and(|s| (200..300).contains(&s)) {
+            "delivered"
+        } else {
+            "failed"
+        };
+        felix.count(format!("{outcome}/{}", self.endpoint));
         tokio::spawn(async move {
             if let Err(err) = felix.publish_unacked("attempts", attempt.encode()).await {
                 tracing::debug!("attempt not logged: {err:#}");
@@ -175,9 +183,10 @@ impl Sender {
             last_response: answer.detail,
             envelope,
         };
+        self.tenant.felix.count(format!("dead/{}", self.endpoint));
         tracing::warn!(endpoint = %self.endpoint, offset, "dead-lettered");
         while let Err(err) = self
-            .app
+            .tenant
             .felix
             .append("dead".to_string(), dead.encode())
             .await
