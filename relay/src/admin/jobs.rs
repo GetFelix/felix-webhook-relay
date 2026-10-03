@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -13,15 +13,16 @@ use felix_relay_core::catalog::{Endpoint, endpoint_key, source_key};
 use felix_relay_core::jobs::{
     DeadMark, DeadStatus, Job, JobKind, JobStatus, OffsetSearch, SEARCH_MARGIN_MS,
 };
-use felix_relay_core::records::DeadLetter;
+use felix_relay_core::records::{Attempt, DeadLetter};
 use felix_relay_core::secret::random_bytes;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiResult, bad_request, entry_key, not_found, read};
+use super::{Admin, ApiError, ApiResult, bad_request, entry_key, not_found, read};
 use crate::catalog::STATE;
 use crate::deliver::read_dead_letter;
 use crate::felix::Felix;
+use crate::tenant::Tenant;
 use crate::{App, unix_millis};
 
 /// How many of the newest dead letters the API lists.
@@ -32,6 +33,8 @@ pub(super) fn routes() -> axum::Router<Arc<App>> {
         .route("/api/{tenant}/sources/{id}/offset", get(offset_at))
         .route("/api/{tenant}/endpoints/{id}/replays", post(start_replay))
         .route("/api/{tenant}/jobs/{id}", get(get_job))
+        .route("/api/{tenant}/endpoints/{id}/retry", post(retry_now))
+        .route("/api/{tenant}/events/{source}/{offset}", get(event))
         .route("/api/{tenant}/dead", get(list_dead))
         .route("/api/{tenant}/dead/{offset}/{action}", post(act_on_dead))
         .route(
@@ -66,13 +69,13 @@ struct At {
 }
 
 async fn offset_at(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id)): Path<(String, String)>,
     Query(At { at }): Query<At>,
 ) -> ApiResult {
-    entry_key(&app, &tenant, &id, source_key)?;
+    entry_key(&id, source_key)?;
     let started = Instant::now();
-    let search = offset_for_time(&app.felix, &format!("src.{id}"), at).await?;
+    let search = offset_for_time(&tenant.felix, &format!("src.{id}"), at).await?;
     Ok(Json(json!({
         "offset": search.result(),
         "reads": search.probes,
@@ -103,30 +106,33 @@ fn new_job_id(kind: &str) -> String {
     )
 }
 
-async fn save_job(app: &App, id: &str, job: &Job) -> Result<(), ApiError> {
+async fn save_job(tenant: &Tenant, id: &str, job: &Job) -> Result<(), ApiError> {
     let json = serde_json::to_vec(job).expect("a job serializes");
-    app.felix
+    tenant
+        .felix
         .cache_put(STATE, &format!("job/{id}"), json, None)
         .await?;
     Ok(())
 }
 
 async fn start_replay(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id)): Path<(String, String)>,
     input: Option<Json<ReplayInput>>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
-    let endpoint: Endpoint = read(&app, &key).await?.ok_or_else(not_found)?;
+    let key = entry_key(&id, endpoint_key)?;
+    let endpoint: Endpoint = read(&tenant, &key).await?.ok_or_else(not_found)?;
     let input = input.map(|Json(input)| input).unwrap_or_default();
     let stream = format!("src.{}", endpoint.source);
-    let (oldest, tail) = app.felix.bounds(&stream).await?;
+    let (oldest, tail) = tenant.felix.bounds(&stream).await?;
     // Aim early and late by the margin; the worker filters by `received_at`.
     let from = match (input.from, input.since) {
         (Some(from), _) => from,
         (None, Some(since)) => {
             let target = since.saturating_sub(SEARCH_MARGIN_MS);
-            offset_for_time(&app.felix, &stream, target).await?.result()
+            offset_for_time(&tenant.felix, &stream, target)
+                .await?
+                .result()
         }
         (None, None) => oldest,
     };
@@ -134,7 +140,9 @@ async fn start_replay(
         (Some(to), _) => to,
         (None, Some(until)) => {
             let target = until.saturating_add(SEARCH_MARGIN_MS);
-            offset_for_time(&app.felix, &stream, target).await?.result()
+            offset_for_time(&tenant.felix, &stream, target)
+                .await?
+                .result()
         }
         (None, None) => tail,
     };
@@ -161,7 +169,7 @@ async fn start_replay(
         updated_at: now,
     };
     let job_id = new_job_id("replay");
-    save_job(&app, &job_id, &job).await?;
+    save_job(&tenant, &job_id, &job).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({ "id": job_id, "from": from, "to": to })),
@@ -169,14 +177,81 @@ async fn start_replay(
         .into_response())
 }
 
-async fn get_job(
-    State(app): State<Arc<App>>,
-    Path((tenant, id)): Path<(String, String)>,
+/// Ask a paused endpoint's worker to skip the rest of its backoff wait.
+async fn retry_now(Admin(tenant, _): Admin, Path((_, id)): Path<(String, String)>) -> ApiResult {
+    let key = entry_key(&id, endpoint_key)?;
+    let _: Endpoint = read(&tenant, &key).await?.ok_or_else(not_found)?;
+    let now = unix_millis();
+    let job = Job {
+        endpoint: id,
+        kind: JobKind::Retry,
+        status: JobStatus::Pending,
+        sent: 0,
+        error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let job_id = new_job_id("retry");
+    save_job(&tenant, &job_id, &job).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": job_id }))).into_response())
+}
+
+/// How far back the event view looks for attempts. The trail has no index,
+/// so this is a scan of its newest records.
+const ATTEMPTS_SCANNED: u64 = 2_000;
+
+/// One event: its envelope as stored, and its recent attempts.
+async fn event(
+    Admin(tenant, _): Admin,
+    Path((_, source, offset)): Path<(String, String, u64)>,
 ) -> ApiResult {
-    if tenant != app.config.tenant {
-        return Err(not_found());
-    }
-    let job: Job = super::read_from(&app, STATE, &format!("job/{id}"))
+    entry_key(&source, source_key)?;
+    let felix = &tenant.felix;
+    let (_, payload) = felix
+        .read(&format!("src.{source}"), offset, offset + 1, 1)
+        .await?
+        .pop()
+        .ok_or_else(not_found)?;
+    let envelope = Envelope::decode(&payload).map_err(|err| bad_request(err.to_string()))?;
+    let endpoints: Vec<String> = tenant
+        .catalog
+        .borrow()
+        .endpoints
+        .iter()
+        .filter(|(_, endpoint)| endpoint.source == source)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let (oldest, tail) = felix.bounds("attempts").await?;
+    let from = oldest.max(tail.saturating_sub(ATTEMPTS_SCANNED));
+    let attempts: Vec<Attempt> = felix
+        .read("attempts", from, tail, ATTEMPTS_SCANNED as usize)
+        .await?
+        .into_iter()
+        .filter_map(|(_, payload)| Attempt::decode(&payload).ok())
+        .filter(|a| a.offset == offset && endpoints.contains(&a.endpoint))
+        .collect();
+    Ok(Json(json!({
+        "source": source,
+        "offset": offset,
+        "id": envelope.event_id(&source, offset),
+        "received_at": envelope.received_at,
+        "event_type": envelope.event_type,
+        "content_type": envelope.content_type,
+        "headers": envelope.headers,
+        "body": String::from_utf8_lossy(&envelope.body),
+        "attempts": attempts.iter().map(|a| json!({
+            "endpoint": a.endpoint,
+            "at": a.at,
+            "millis": a.millis,
+            "status": a.status,
+            "detail": a.detail,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
+}
+
+async fn get_job(Admin(tenant, _): Admin, Path((_, id)): Path<(String, String)>) -> ApiResult {
+    let job: Job = super::read_from(&tenant, STATE, &format!("job/{id}"))
         .await?
         .ok_or_else(not_found)?;
     Ok(Json(job).into_response())
@@ -184,11 +259,14 @@ async fn get_job(
 
 /// Both kinds of dead letter: the relay's own, newest first, with what has
 /// become of each, and the ones Felix holds for each endpoint's group.
-async fn list_dead(State(app): State<Arc<App>>, Path(tenant): Path<String>) -> ApiResult {
-    if tenant != app.config.tenant {
-        return Err(not_found());
-    }
-    let felix = &app.felix;
+async fn list_dead(Admin(tenant, _): Admin) -> ApiResult {
+    Ok(Json(dead_letters(&tenant).await?).into_response())
+}
+
+/// `{"relay": [...], "broker": [...]}`: the newest relay dead letters with
+/// their marks, and Felix's group dead letters for every endpoint.
+pub(super) async fn dead_letters(tenant: &Tenant) -> Result<serde_json::Value, ApiError> {
+    let felix = &tenant.felix;
     let (oldest, tail) = felix.bounds("dead").await?;
     let mut relay = Vec::new();
     for (offset, payload) in felix
@@ -206,7 +284,7 @@ async fn list_dead(State(app): State<Arc<App>>, Path(tenant): Path<String>) -> A
             continue;
         };
         let mark: Option<DeadMark> =
-            super::read_from(&app, STATE, &format!("dead/{offset}")).await?;
+            super::read_from(tenant, STATE, &format!("dead/{offset}")).await?;
         relay.push(json!({
             "offset": offset,
             "endpoint": dead.endpoint,
@@ -220,7 +298,7 @@ async fn list_dead(State(app): State<Arc<App>>, Path(tenant): Path<String>) -> A
             "mark": mark,
         }));
     }
-    let endpoints: Vec<(String, Endpoint)> = app
+    let endpoints: Vec<(String, Endpoint)> = tenant
         .catalog
         .borrow()
         .endpoints
@@ -245,17 +323,14 @@ async fn list_dead(State(app): State<Arc<App>>, Path(tenant): Path<String>) -> A
             broker.push(json!({ "endpoint": id, "source": endpoint.source, "offset": offset }));
         }
     }
-    Ok(Json(json!({ "relay": relay, "broker": broker })).into_response())
+    Ok(json!({ "relay": relay, "broker": broker }))
 }
 
 async fn act_on_dead(
-    State(app): State<Arc<App>>,
-    Path((tenant, offset, action)): Path<(String, u64, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, offset, action)): Path<(String, u64, String)>,
 ) -> ApiResult {
-    if tenant != app.config.tenant {
-        return Err(not_found());
-    }
-    let dead = read_dead_letter(&app.felix, offset)
+    let dead = read_dead_letter(&tenant.felix, offset)
         .await
         .map_err(|_| not_found())?;
     let mut answer = json!({ "offset": offset });
@@ -274,7 +349,7 @@ async fn act_on_dead(
                 updated_at: now,
             };
             let job_id = new_job_id("redrive");
-            save_job(&app, &job_id, &job).await?;
+            save_job(&tenant, &job_id, &job).await?;
             answer["job"] = json!(job_id);
             DeadMark {
                 status: DeadStatus::Redriving,
@@ -290,7 +365,8 @@ async fn act_on_dead(
         _ => return Err(not_found()),
     };
     let json = serde_json::to_vec(&mark).expect("a mark serializes");
-    app.felix
+    tenant
+        .felix
         .cache_put(STATE, &format!("dead/{offset}"), json, None)
         .await?;
     answer["mark"] = json!(mark);
@@ -300,12 +376,12 @@ async fn act_on_dead(
 /// A record Felix dead-lettered for an endpoint's group after it was claimed
 /// too many times: put it back in play, or drop it.
 async fn act_on_broker_dead(
-    State(app): State<Arc<App>>,
-    Path((tenant, id, offset, action)): Path<(String, String, u64, String)>,
+    Admin(tenant, _): Admin,
+    Path((_, id, offset, action)): Path<(String, String, u64, String)>,
 ) -> ApiResult {
-    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
-    let endpoint: Endpoint = read(&app, &key).await?.ok_or_else(not_found)?;
-    let felix = &app.felix;
+    let key = entry_key(&id, endpoint_key)?;
+    let endpoint: Endpoint = read(&tenant, &key).await?.ok_or_else(not_found)?;
+    let felix = &tenant.felix;
     let stream = format!("src.{}", endpoint.source);
     let group = format!("ep.{id}");
     let client = felix.client();

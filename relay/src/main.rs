@@ -2,6 +2,7 @@
 //! as intake, delivery, admin, or any mix, picked by `RELAY_ROLES`.
 
 mod admin;
+mod auth;
 mod catalog;
 mod config;
 mod deliver;
@@ -9,7 +10,10 @@ mod felix;
 mod intake;
 mod metrics;
 mod report;
+mod session;
+mod tenant;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,19 +23,18 @@ use axum::extract::State;
 use axum::routing::get;
 use tracing_subscriber::EnvFilter;
 
-use crate::catalog::{Catalog, Jobs};
 use crate::config::Config;
-use crate::felix::Felix;
 use crate::metrics::Metrics;
+use crate::tenant::Tenant;
 
 /// What every role shares.
 pub(crate) struct App {
     pub(crate) config: Config,
-    pub(crate) felix: Arc<Felix>,
-    /// Every source and endpoint, kept current from Felix.
-    pub(crate) catalog: tokio::sync::watch::Receiver<Arc<Catalog>>,
-    /// Replay and redrive jobs.
-    pub(crate) jobs: tokio::sync::watch::Receiver<Arc<Jobs>>,
+    /// The relay tenants this process serves, each on its own connection
+    /// with a token narrowed to that tenant. Empty for an admin-only process,
+    /// which works with each admin's own token.
+    pub(crate) tenants: HashMap<String, Arc<Tenant>>,
+    pub(crate) sessions: session::Sessions,
     pub(crate) metrics: Metrics,
 }
 
@@ -42,14 +45,37 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let felix = Arc::new(Felix::connect(&config).await?);
-    let catalog = catalog::follow(Arc::clone(&felix)).await?;
-    let jobs = catalog::follow(Arc::clone(&felix)).await?;
+    // `felix-relay token <tenant>` prints the Felix token this process would
+    // connect to that tenant with, so its narrowing can be checked against
+    // the broker directly.
+    if let [_, command, tenant] = std::env::args().collect::<Vec<_>>().as_slice()
+        && command == "token"
+    {
+        let tokens = auth::service_tokens(&config, tenant);
+        println!("{}", tokens.token().await?);
+        return Ok(());
+    }
+    let mut tenants = HashMap::new();
+    if config.roles.intake || config.roles.deliver {
+        for name in &config.tenants {
+            let tokens = auth::service_tokens(&config, name);
+            let tenant = Tenant::open(&config, name, tokens)
+                .await
+                .with_context(|| format!("open tenant {name}"))?;
+            // Reading the streams needs `stream.subscribe`, which intake's
+            // narrowed token does not have.
+            if config.roles.deliver {
+                for warning in tenant.retention_warnings(&config).await {
+                    tracing::warn!(tenant = %name, "retention: {warning}");
+                }
+            }
+            tenants.insert(name.clone(), tenant);
+        }
+    }
     let app = Arc::new(App {
         config,
-        felix,
-        catalog,
-        jobs,
+        tenants,
+        sessions: session::Sessions::default(),
         metrics: Metrics::default(),
     });
     let roles = app.config.roles;
@@ -61,7 +87,7 @@ async fn main() -> Result<()> {
         router = router.merge(intake::routes());
     }
     if roles.admin {
-        router = router.merge(admin::routes());
+        router = router.merge(admin::routes()).merge(session::routes());
     }
     let router = router.with_state(Arc::clone(&app));
 

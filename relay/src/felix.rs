@@ -4,60 +4,97 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use felix_client::{ClientConfig, ClusterClient, IdempotentProducer, StartPosition};
+use felix_client::{ClientConfig, ClusterClient, IdempotentProducer, StartPosition, TokenProvider};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::Config;
 
-/// How often one append is re-sent before the producer is replaced.
+/// How often one batch is re-sent before the producer is replaced.
 const APPEND_ATTEMPTS: u32 = 5;
+/// The most appends gathered into one batch.
+const MAX_BATCH: usize = 256;
+
+/// How many subscriptions one reads connection opens before it is replaced.
+/// Felix's default is 1,024 streams to a connection.
+const READS_PER_CONNECTION: usize = 400;
+
+/// Connections the delivery tasks' group polls and acknowledgements are
+/// spread over. Every idle endpoint holds a waiting poll, which holds one of
+/// a connection's 1,024 streams, so a thousand endpoints on one connection
+/// would leave the busy ones queueing for a stream.
+const GROUP_CONNECTIONS: usize = 4;
 
 pub(crate) struct Felix {
-    /// Lives as long as the process, which lets the producer borrow it.
-    client: &'static Arc<ClusterClient>,
+    client: Arc<ClusterClient>,
+    groups: Vec<Arc<ClusterClient>>,
+    /// The connection short reads go through: tails, single records, ranges.
+    /// A dropped Felix subscription keeps its stream until the broker next
+    /// writes to it, which on a quiet stream is never, so this connection is
+    /// replaced every few hundred subscriptions and dropping it frees them.
+    reads: tokio::sync::Mutex<(Arc<ClusterClient>, usize)>,
+    config: Config,
+    tokens: Arc<dyn TokenProvider>,
     /// The Felix tenant and the namespace every stream, group and cache lives in.
     pub(crate) tenant: String,
     pub(crate) namespace: String,
-    producer: Mutex<Option<IdempotentProducer<'static>>>,
+    appends: mpsc::Sender<Pending>,
 }
 
 impl Felix {
-    pub(crate) async fn connect(config: &Config) -> Result<Self> {
-        let roots = match &config.ca_file {
-            Some(path) => {
-                let mut roots = RootCertStore::empty();
-                for cert in CertificateDer::pem_file_iter(path)
-                    .with_context(|| format!("read {}", path.display()))?
-                {
-                    roots.add(cert.context("parse broker CA certificate")?)?;
-                }
-                Some(Arc::new(roots))
-            }
-            None => None,
-        };
-        let token = std::fs::read_to_string(&config.token_file)
-            .with_context(|| format!("read {}", config.token_file.display()))?;
-
-        let quic = felix_client::quic_client_config(roots, true)?;
-        let mut client_config = ClientConfig::optimized_defaults(quic);
-        client_config.auth_tenant_id = Some(config.felix_tenant.clone());
-        client_config.auth_token = Some(token.trim().to_string());
-        let client = ClusterClient::connect(&config.brokers, &config.server_name, client_config)
-            .await
-            .context("connect to Felix")?;
+    pub(crate) async fn connect(
+        config: &Config,
+        namespace: &str,
+        tokens: Arc<dyn TokenProvider>,
+    ) -> Result<Self> {
+        let client = Arc::new(open(config, Arc::clone(&tokens)).await?);
+        let reads = Arc::new(open(config, Arc::clone(&tokens)).await?);
+        let mut groups = Vec::new();
+        for _ in 0..GROUP_CONNECTIONS {
+            groups.push(Arc::new(open(config, Arc::clone(&tokens)).await?));
+        }
+        let (appends, waiting) = mpsc::channel(MAX_BATCH * 4);
+        tokio::spawn(appender(
+            Arc::clone(&client),
+            config.felix_tenant.clone(),
+            namespace.to_string(),
+            waiting,
+        ));
         Ok(Self {
-            client: Box::leak(Box::new(Arc::new(client))),
+            client,
+            groups,
+            reads: tokio::sync::Mutex::new((reads, 0)),
+            config: config.clone(),
+            tokens,
             tenant: config.felix_tenant.clone(),
-            namespace: config.tenant.clone(),
-            producer: Mutex::new(None),
+            namespace: namespace.to_string(),
+            appends,
         })
     }
 
-    pub(crate) fn client(&self) -> &'static Arc<ClusterClient> {
-        self.client
+    /// The reads connection, counting the `subscriptions` the caller opens.
+    async fn reader(&self, subscriptions: usize) -> Result<Arc<ClusterClient>> {
+        let mut reads = self.reads.lock().await;
+        if reads.1 + subscriptions > READS_PER_CONNECTION {
+            *reads = (
+                Arc::new(open(&self.config, Arc::clone(&self.tokens)).await?),
+                0,
+            );
+        }
+        reads.1 += subscriptions;
+        Ok(Arc::clone(&reads.0))
+    }
+
+    pub(crate) fn client(&self) -> &Arc<ClusterClient> {
+        &self.client
+    }
+
+    /// The connection one endpoint's group traffic goes through.
+    pub(crate) fn group_client(&self, endpoint: &str) -> &ClusterClient {
+        let index = felix_relay_core::catalog::owner(endpoint, GROUP_CONNECTIONS as u32);
+        &self.groups[index as usize]
     }
 
     pub(crate) async fn cache_get(&self, cache: &str, key: &str) -> Result<Option<Vec<u8>>> {
@@ -104,13 +141,35 @@ impl Felix {
         Ok(())
     }
 
+    /// Add to a counter in `stats` without waiting. Counters are for the
+    /// dashboard: Felix counts a retried add twice, so they are approximate.
+    pub(crate) fn count(self: &Arc<Self>, key: String) {
+        let felix = Arc::clone(self);
+        tokio::spawn(async move {
+            let client = felix.client.client().await;
+            let added = client
+                .counter_add(&felix.tenant, &felix.namespace, "stats", &key, 1)
+                .await;
+            if let Err(err) = added {
+                tracing::debug!(%key, "not counted: {err:#}");
+            }
+        });
+    }
+
+    pub(crate) async fn counter(&self, key: &str) -> Result<i64> {
+        let client = self.client.client().await;
+        let value = client
+            .counter_get(&self.tenant, &self.namespace, "stats", key)
+            .await?;
+        Ok(value.unwrap_or(0))
+    }
+
     /// The oldest offset `stream` still holds, and the offset the next record
     /// appended to it will get.
     pub(crate) async fn bounds(&self, stream: &str) -> Result<(u64, u64)> {
-        let subscribe = |start| {
-            self.client
-                .subscribe_from(&self.tenant, &self.namespace, stream, Some(start))
-        };
+        let reads = self.reader(2).await?;
+        let subscribe =
+            |start| reads.subscribe_from(&self.tenant, &self.namespace, stream, Some(start));
         let oldest = subscribe(StartPosition::Earliest).await?.start_offset();
         let tail = subscribe(StartPosition::Latest)
             .await?
@@ -133,7 +192,8 @@ impl Felix {
             return Ok(records);
         }
         let mut subscription = self
-            .client
+            .reader(1)
+            .await?
             .subscribe_from(
                 &self.tenant,
                 &self.namespace,
@@ -177,45 +237,141 @@ impl Felix {
 
     /// Append one record to `stream` exactly once and return its offset.
     ///
-    /// Runs on its own task: dropping an idempotent publish midway stops the
-    /// producer, and an HTTP handler is dropped whenever its sender hangs up.
-    pub(crate) async fn append(self: &Arc<Self>, stream: String, payload: Vec<u8>) -> Result<u64> {
-        let felix = Arc::clone(self);
-        tokio::spawn(async move { felix.append_inner(&stream, payload).await })
+    /// The append is handed to the connection's appender task, so a caller
+    /// that is dropped midway, such as an HTTP handler whose sender hung up,
+    /// cannot cancel an idempotent publish halfway, which would stop the
+    /// producer. Appends that arrive while one is in flight go out together
+    /// as one batch under one sequence number.
+    pub(crate) async fn append(&self, stream: String, payload: Vec<u8>) -> Result<u64> {
+        let (done, answer) = oneshot::channel();
+        self.appends
+            .send(Pending {
+                stream,
+                payload,
+                done,
+            })
             .await
-            .context("append task")?
+            .map_err(|_| anyhow::anyhow!("the appender stopped"))?;
+        answer.await.context("the appender stopped")?
     }
+}
 
-    async fn append_inner(&self, stream: &str, payload: Vec<u8>) -> Result<u64> {
-        let mut producer = self.producer.lock().await;
-        if producer.is_none() {
-            *producer = Some(self.client.idempotent_producer().await?);
-        }
-        let current = producer.as_ref().expect("set above");
-        let mut last = None;
-        for attempt in 0..APPEND_ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(100 << attempt)).await;
+/// One append waiting for its turn.
+struct Pending {
+    stream: String,
+    payload: Vec<u8>,
+    done: oneshot::Sender<Result<u64>>,
+}
+
+/// Take appends as they come and publish what has gathered, per stream, in
+/// arrival order.
+async fn appender(
+    client: Arc<ClusterClient>,
+    tenant: String,
+    namespace: String,
+    mut appends: mpsc::Receiver<Pending>,
+) {
+    let mut producer = None;
+    while let Some(first) = appends.recv().await {
+        let mut gathered = vec![first];
+        while gathered.len() < MAX_BATCH {
+            match appends.try_recv() {
+                Ok(next) => gathered.push(next),
+                Err(_) => break,
             }
-            // Re-sending the same payload after an error lands it at most
-            // once, which is the whole point of the producer.
-            match current
-                .publish(&self.tenant, &self.namespace, stream, payload.clone())
-                .await
+        }
+        let mut streams: Vec<(String, Vec<Pending>)> = Vec::new();
+        for pending in gathered {
+            match streams
+                .iter_mut()
+                .find(|(stream, _)| *stream == pending.stream)
             {
-                Ok(Some(offset)) => return Ok(offset),
-                Ok(None) => bail!("Felix acknowledged the append without an offset"),
-                Err(err) => {
-                    tracing::warn!(%stream, attempt, "append failed: {err:#}");
-                    last = Some(err);
-                }
+                Some((_, batch)) => batch.push(pending),
+                None => streams.push((pending.stream.clone(), vec![pending])),
             }
         }
-        // The batch is in doubt and this producer refuses anything else until
-        // it lands, so start over with a new one for the next webhook.
-        *producer = None;
-        Err(last
-            .expect("at least one attempt")
-            .context("append to Felix"))
+        for (stream, batch) in streams {
+            let payloads = batch.iter().map(|p| p.payload.clone()).collect();
+            let result = publish_batch(
+                &client,
+                &mut producer,
+                &tenant,
+                &namespace,
+                &stream,
+                payloads,
+            )
+            .await;
+            for (index, pending) in batch.into_iter().enumerate() {
+                let answer = match &result {
+                    Ok(first) => Ok(first + index as u64),
+                    Err(err) => Err(anyhow::anyhow!("{err:#}")),
+                };
+                let _ = pending.done.send(answer);
+            }
+        }
     }
+}
+
+/// Publish one batch, re-sending it a few times, and return its first offset.
+/// The records of a batch land together, at consecutive offsets.
+async fn publish_batch<'a>(
+    client: &'a ClusterClient,
+    producer: &mut Option<IdempotentProducer<'a>>,
+    tenant: &str,
+    namespace: &str,
+    stream: &str,
+    payloads: Vec<Vec<u8>>,
+) -> Result<u64> {
+    if producer.is_none() {
+        *producer = Some(client.idempotent_producer().await?);
+    }
+    let current = producer.as_ref().expect("set above");
+    let mut last = None;
+    for attempt in 0..APPEND_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(100 << attempt)).await;
+        }
+        // Re-sending the same batch after an error lands it at most once,
+        // which is the whole point of the producer.
+        match current
+            .publish_batch(tenant, namespace, stream, payloads.clone())
+            .await
+        {
+            Ok(Some(offset)) => return Ok(offset),
+            Ok(None) => bail!("Felix acknowledged the append without an offset"),
+            Err(err) => {
+                tracing::warn!(%stream, attempt, "append failed: {err:#}");
+                last = Some(err);
+            }
+        }
+    }
+    // The batch is in doubt and this producer refuses anything else until it
+    // lands, so start over with a new one for the next batch.
+    *producer = None;
+    Err(last
+        .expect("at least one attempt")
+        .context("append to Felix"))
+}
+
+/// A connection to the brokers with the configured trust and tokens.
+async fn open(config: &Config, tokens: Arc<dyn TokenProvider>) -> Result<ClusterClient> {
+    let roots = match &config.ca_file {
+        Some(path) => {
+            let mut roots = RootCertStore::empty();
+            for cert in CertificateDer::pem_file_iter(path)
+                .with_context(|| format!("read {}", path.display()))?
+            {
+                roots.add(cert.context("parse broker CA certificate")?)?;
+            }
+            Some(Arc::new(roots))
+        }
+        None => None,
+    };
+    let quic = felix_client::quic_client_config(roots, true)?;
+    let mut client_config = ClientConfig::optimized_defaults(quic);
+    client_config.auth_tenant_id = Some(config.felix_tenant.clone());
+    client_config.token_provider = Some(tokens);
+    ClusterClient::connect(&config.brokers, &config.server_name, client_config)
+        .await
+        .context("connect to Felix")
 }

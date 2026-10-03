@@ -19,10 +19,13 @@ use felix_relay_core::catalog::{Disabled, Endpoint, Mode, endpoint_key};
 use felix_relay_core::health::{Decision, Health, Outcome, State};
 use futures_util::future::join_all;
 
+use super::job::save;
 use super::send::{Answer, FELIX_RETRY, Sender, jitter};
 use crate::catalog::CONFIG;
 use crate::report::Reporter;
+use crate::tenant::Tenant;
 use crate::{App, unix_millis};
+use felix_relay_core::jobs::{JobKind, JobStatus};
 
 /// Records an ordered endpoint takes per poll.
 const ORDERED_BATCH: u32 = 16;
@@ -40,6 +43,7 @@ struct Held {
 
 pub(super) struct Task {
     app: Arc<App>,
+    tenant: Arc<Tenant>,
     endpoint: String,
     source: String,
     stream: String,
@@ -55,9 +59,15 @@ pub(super) struct Task {
 }
 
 impl Task {
-    pub(super) fn new(app: Arc<App>, id: &str, endpoint: &Endpoint, http: reqwest::Client) -> Self {
+    pub(super) fn new(
+        app: Arc<App>,
+        tenant: Arc<Tenant>,
+        id: &str,
+        endpoint: &Endpoint,
+        http: reqwest::Client,
+    ) -> Self {
         Self {
-            reporter: Reporter::start(Arc::clone(&app.felix), id, app.config.reporter.clone()),
+            reporter: Reporter::start(Arc::clone(&tenant.felix), id, app.config.reporter.clone()),
             endpoint: id.to_string(),
             source: endpoint.source.clone(),
             stream: format!("src.{}", endpoint.source),
@@ -66,6 +76,7 @@ impl Task {
             window: endpoint.in_flight(),
             sender: Sender {
                 app: Arc::clone(&app),
+                tenant: Arc::clone(&tenant),
                 endpoint: id.to_string(),
                 source: endpoint.source.clone(),
                 http,
@@ -73,12 +84,13 @@ impl Task {
             health: Health::default(),
             disabling: false,
             last_offset: None,
+            tenant,
             app,
         }
     }
 
-    fn felix(&self) -> &'static ClusterClient {
-        self.app.felix.client()
+    fn felix(&self) -> &ClusterClient {
+        self.tenant.felix.group_client(&self.endpoint)
     }
 
     pub(super) async fn run(mut self) -> Result<()> {
@@ -88,7 +100,7 @@ impl Task {
         // run before this one come back only once they lapse. Polling before
         // then would hand out newer records ahead of them.
         tokio::time::sleep(self.app.config.claim_wait).await;
-        let felix = Arc::clone(&self.app.felix);
+        let felix = Arc::clone(&self.tenant.felix);
         let batch = match self.mode {
             Mode::Ordered => ORDERED_BATCH,
             Mode::Unordered => self.window,
@@ -121,12 +133,16 @@ impl Task {
             };
             let polled_at = unix_millis();
             let mut wanted = Vec::new();
+            let mut skipped = Vec::new();
             for record in records {
                 match self.take(record.offset, &record.payload, polled_at).await? {
                     Some(held) => wanted.push(held),
-                    None => self.ack(record.offset).await,
+                    None => skipped.push(record.offset),
                 }
             }
+            // Records it does not want, or that predate it, settle together:
+            // a new endpoint on a long log acknowledges its way past all of it.
+            join_all(skipped.into_iter().map(|offset| self.ack(offset))).await;
             match self.mode {
                 Mode::Ordered => {
                     for held in wanted {
@@ -139,7 +155,7 @@ impl Task {
     }
 
     async fn wait_for_jobs_that_pause_live(&self) -> Result<()> {
-        let mut jobs = self.app.jobs.clone();
+        let mut jobs = self.tenant.jobs.clone();
         while jobs
             .borrow_and_update()
             .0
@@ -244,10 +260,36 @@ impl Task {
                     tracing::warn!(endpoint = %self.endpoint, "disabling: {reason}");
                     self.disable(reason).await;
                 }
-                None => tokio::time::sleep(wait).await,
+                None => self.wait_or_retry(wait).await,
             }
         }
         Ok(())
+    }
+
+    /// Wait out a backoff, unless an operator asks to retry now.
+    async fn wait_or_retry(&self, wait: Duration) {
+        let mut jobs = self.tenant.jobs.clone();
+        let sleep = tokio::time::sleep(wait);
+        tokio::pin!(sleep);
+        loop {
+            let asked = jobs.borrow_and_update().0.iter().find_map(|(id, job)| {
+                (job.endpoint == self.endpoint && job.kind == JobKind::Retry && job.active())
+                    .then(|| (id.clone(), job.clone()))
+            });
+            if let Some((id, mut job)) = asked {
+                tracing::info!(endpoint = %self.endpoint, "retrying now, as asked");
+                job.status = JobStatus::Done;
+                save(&self.tenant.felix, &id, &mut job).await;
+                return;
+            }
+            tokio::select! {
+                () = &mut sleep => return,
+                changed = jobs.changed() => if changed.is_err() {
+                    (&mut sleep).await;
+                    return;
+                },
+            }
+        }
     }
 
     fn report(&self, before: State, outcomes: &[Outcome], answers: &[Answer]) {
@@ -272,7 +314,7 @@ impl Task {
     /// The endpoint's config once it exists and is enabled. While it is
     /// disabled the task waits here, holding whatever it had claimed.
     async fn enabled(&mut self) -> Result<Endpoint> {
-        let mut catalog = self.app.catalog.clone();
+        let mut catalog = self.tenant.catalog.clone();
         loop {
             let endpoint = catalog
                 .borrow_and_update()
@@ -312,7 +354,7 @@ impl Task {
     /// Mark the endpoint disabled in config, where an operator sees it and
     /// can enable it again.
     async fn disable(&mut self, reason: String) {
-        let felix = &self.app.felix;
+        let felix = &self.tenant.felix;
         let key = endpoint_key(&self.endpoint);
         loop {
             let written = async {
@@ -338,7 +380,7 @@ impl Task {
     }
 
     async fn ack(&self, offset: u64) {
-        let felix = &self.app.felix;
+        let felix = &self.tenant.felix;
         while let Err(err) = self
             .felix()
             .group_ack(

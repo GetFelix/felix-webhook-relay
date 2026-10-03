@@ -54,7 +54,6 @@ jobs:
       - name: Integration tests
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --tests -- --include-ignored
       - name: Felix logs
         if: failure()
@@ -80,22 +79,58 @@ jobs:
           RELAY_TEST_OUTAGE: 60s
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --test outage -- --include-ignored an_endpoint_that_was_down
       - name: Slow endpoint isolation, 1,000 webhooks
         env:
           RELAY_TEST_ISOLATION_WEBHOOKS: "1000"
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
-          cargo test --locked --test endpoints -- --include-ignored --nocapture a_slow_endpoint
+          cargo test --locked --test isolation -- --include-ignored --nocapture
       - name: Offset for a time, 10 million records
         env:
           RELAY_TEST_SEARCH_RECORDS: "10000000"
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --test replay -- --include-ignored --nocapture the_offset_for_a_time
+      - name: Performance measurements
+        env:
+          RELAY_TEST_PERF: "1"
+        run: |
+          export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
+          cargo test --locked --release --test load -- --include-ignored --nocapture measure
       - name: Felix logs
         if: failure()
         run: docker compose -f dev/docker-compose.yml logs
+
+  # Demonstration 5 and the retention guard each need a stack of their own:
+  # three brokers to kill, and a broker that keeps records for seconds. Not
+  # required checks: they take minutes and restart Docker containers.
+  crash-and-retention:
+    name: crash and retention
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the tests
+        run: cargo test --locked --no-run
+      - name: Start three brokers
+        run: dev/up.sh --cluster
+      - name: Kill intake, a worker and each broker under load
+        env:
+          RELAY_TEST_CLUSTER: "1"
+        run: |
+          export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
+          cargo test --locked --test crash -- --include-ignored --nocapture
+      - name: Start a broker with seconds of retention
+        run: dev/up.sh --retention
+      - name: Short retention is reported
+        env:
+          RELAY_TEST_RETENTION: "1"
+        run: |
+          export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
+          cargo test --locked --test retention -- --include-ignored --nocapture
+      - name: Felix logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml -f dev/docker-compose.cluster.yml logs

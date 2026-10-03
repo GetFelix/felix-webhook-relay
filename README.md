@@ -14,7 +14,7 @@ durably before answering. It delivers each one to its endpoints, signed, with
 retries and backoff. It sets aside what an endpoint keeps refusing, and it can
 replay any endpoint over a time range after an outage.
 
-**Status: M4 done.** Sources and endpoints live in Felix, written through
+**Status: M6 done.** Sources and endpoints live in Felix, written through
 the admin API with their secrets sealed. Intake verifies Standard Webhooks,
 GitHub, Stripe and generic HMAC signatures before anything is stored, and
 dedupes retries on the sender's event id. Deliveries are signed with
@@ -27,7 +27,12 @@ backlog waits in the log, a record it keeps refusing goes to the `dead`
 stream, and an endpoint that answers `410` or fails for three days is
 disabled until an operator enables it. Any endpoint can replay a time or
 offset range from the log beside live delivery, and dead letters can be
-redriven or discarded. Tenants and the admin page are still to come.
+redriven or discarded. One process serves many tenants, each confined to
+its own Felix namespace by narrowed tokens, and admins sign in to a plain
+HTML page or use the JSON API. Killing intake, a worker, or any broker of a
+three-broker cluster under load loses nothing that was acknowledged, and the
+measured performance is in [docs/performance.md](docs/performance.md).
+Packaging for self-hosting is still to come.
 The design and the plan are in [docs/design.md](docs/design.md).
 
 ## Why it exists
@@ -78,31 +83,44 @@ cargo test
 ```
 
 `dev/up.sh` starts a Felix broker and control plane from the published
-0.6.0-preview images, with a stand-in identity provider. It seeds the `acme`
-tenant with the relay's caches and a `src.demo` stream, and writes the
-broker's certificate, a relay token and an operator token to `dev/state/`:
+0.6.0-preview images, Dex for admins to sign in with, and a stand-in identity
+provider for the relay's own token. It seeds two relay tenants, `acme` and
+`globex`, with their caches and admin roles, and writes the broker's
+certificate and the relay's IdP token to `dev/state/`:
 
 ```bash
 dev/up.sh
 export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
+export RELAY_IDP_TOKEN_FILE="$PWD/dev/state/relay-idp.token"
+export RELAY_OIDC_ISSUER=http://127.0.0.1:5556/dex
+export RELAY_OIDC_CLIENT_ID=relay-admin RELAY_OIDC_CLIENT_SECRET=dev-admin-secret
 export RELAY_SECRET_KEY="$(openssl rand -base64 32)"
-cargo run -p felix-relay
+RELAY_TENANTS=acme,globex cargo run -p felix-relay
 ```
 
-Sources and endpoints are written through the admin API. A source's stream
-must exist first; `dev/up.sh` made `src.demo`. A source with a `token` scheme
-gets a long random token in its URL, and the answer shows it once:
+Open <http://127.0.0.1:8090/admin/acme> and sign in as `alice@example.com`
+with the password `password`. Alice administers `acme`, `bob@example.com`
+administers `globex`, and `carol@example.com` administers nothing, so the
+control plane refuses her. The page creates sources and endpoints, shows
+health, lag and counts, and replays, retries, redrives and rotates.
+
+The same actions are a JSON API under `/api/<tenant>/`, which takes an ID
+token as a bearer token:
 
 ```bash
-curl -s -X PUT -H 'content-type: application/json' \
-  -d '{"scheme": {"type": "token"}}' http://127.0.0.1:8090/api/acme/sources/demo
-curl -s -X PUT -H 'content-type: application/json' \
-  -d '{"source": "demo", "url": "http://127.0.0.1:9000/hook"}' \
+token=$(curl -s -u relay-admin:dev-admin-secret http://127.0.0.1:5556/dex/token \
+  -d grant_type=password -d username=alice@example.com -d password=password \
+  -d scope='openid email' | jq -r .id_token)
+api() { curl -s -H "authorization: Bearer $token" -H 'content-type: application/json' "$@"; }
+api -X PUT -d '{"scheme": {"type": "token"}}' http://127.0.0.1:8090/api/acme/sources/demo
+api -X PUT -d '{"source": "demo", "url": "http://127.0.0.1:9000/hook"}' \
   http://127.0.0.1:8090/api/acme/endpoints/demo
 ```
 
-The endpoint's answer holds its `whsec_` signing secret. An endpoint also
+Creating a source creates its stream through the control plane, with the
+admin's own token. A source with a `token` scheme gets a long random token in
+its URL, and the answer shows it once. The endpoint's answer holds its
+`whsec_` signing secret. An endpoint also
 takes `"mode": "unordered"` with a `"window"` (default 16) of requests in
 flight, `"event_types"` to receive only some, and `"backfill": true` to start
 from the beginning of the source's log instead of its tail. Send a webhook to
@@ -128,10 +146,10 @@ A source verifies one of these schemes, named in its `scheme`:
 or `{"json": "data.id"}`. With one, every delivery carries the sender's id and
 a retry of a stored webhook answers `200` without storing it again.
 
-The admin API has no sign-in yet. A process running the admin role refuses
-to listen on anything but a loopback address unless
-`RELAY_ADMIN_ALLOW_PUBLIC=true`, which is only for an admin process behind
-something that authenticates. In a deployment, run intake on its own.
+Every Felix connection the relay opens is for one tenant, with a token the
+control plane narrowed to that tenant's namespace, and every admin request
+uses the admin's own token narrowed the same way. A tenant cannot reach
+another's data even through a bug in the relay: the broker refuses it.
 
 A `token` source's token is a secret in the URL path. The relay never writes
 request paths to its log or its metrics, but a proxy or load balancer in
@@ -143,18 +161,32 @@ The integration tests run the relay against that stack:
 cargo test -- --include-ignored
 ```
 
+`dev/up.sh --cluster` starts three replicating brokers instead, for the crash
+test, and `dev/up.sh --retention` a broker that keeps records for seconds, for
+the retention guard:
+
+```bash
+dev/up.sh --cluster && RELAY_TEST_CLUSTER=1 cargo test --test crash -- --include-ignored
+dev/up.sh --retention && RELAY_TEST_RETENTION=1 cargo test --test retention -- --include-ignored
+```
+
 | Variable | Default | What |
 |---|---|---|
 | `RELAY_ROLES` | `intake,deliver,admin` | Which roles this process runs |
 | `RELAY_LISTEN` | `127.0.0.1:8090` | HTTP address for intake, the admin API, `/healthz` and `/metrics` |
-| `RELAY_ADMIN_ALLOW_PUBLIC` | `false` | Let a process with the admin role listen on a non-loopback address |
+| `RELAY_PUBLIC_URL` | `http://<RELAY_LISTEN>` | Where browsers reach the relay, for the sign-in redirect |
+| `RELAY_OIDC_ISSUER` | none; required for `admin` | The IdP admins sign in with |
+| `RELAY_OIDC_CLIENT_ID`, `RELAY_OIDC_CLIENT_SECRET` | none; required for `admin` | The relay's client at that IdP |
 | `RELAY_SECRET_KEY` | none, required | 32 bytes, base64 or hex, that seal every secret the relay stores in Felix |
 | `RELAY_FELIX_BROKERS` | `127.0.0.1:5000` | Comma-separated broker addresses |
 | `RELAY_FELIX_SERVER_NAME` | `localhost` | Name the broker certificate is checked against |
 | `RELAY_FELIX_CA_FILE` | platform roots | PEM certificates to trust for the broker |
-| `RELAY_FELIX_TOKEN_FILE` | none, required | Felix token |
+| `RELAY_IDP_TOKEN_FILE` | none, required | An ID token for the relay's service principal, read again before each token exchange |
+| `RELAY_FELIX_CONTROL_PLANE` | `http://127.0.0.1:8443` | Where tokens are exchanged and streams created |
 | `RELAY_FELIX_TENANT` | `relay` | The Felix tenant of the deployment |
-| `RELAY_TENANT` | `acme` | The relay tenant, which is a Felix namespace |
+| `RELAY_STREAM_REPLICAS` | `1` | Brokers that hold each new source's stream; above 1 its writes wait for a majority |
+| `RELAY_REPLAY_WINDOW` | `7d` | How far back replays should reach; the relay warns when broker retention is shorter than this plus `RELAY_DISABLE_AFTER` |
+| `RELAY_TENANTS` | `acme` | Comma-separated relay tenants this process serves, each a Felix namespace |
 | `RELAY_WORKER_INDEX` | `0` | This delivery process's index; it owns the endpoints whose id hashes to it |
 | `RELAY_WORKER_COUNT` | `1` | How many delivery processes share the endpoints |
 | `RELAY_ENDPOINT_PREFIXES` | all | Comma-separated; only endpoints whose ids start with one of these |
@@ -172,10 +204,9 @@ cargo test -- --include-ignored
 Replay an endpoint over a time range (Unix milliseconds), then follow the job:
 
 ```bash
-curl -s -X POST -H 'content-type: application/json' \
-  -d '{"since": 1791030000000, "until": 1791030600000}' \
+api -X POST -d '{"since": 1791030000000, "until": 1791030600000}' \
   http://127.0.0.1:8090/api/acme/endpoints/demo/replays
-curl -s http://127.0.0.1:8090/api/acme/jobs/<id>
+api http://127.0.0.1:8090/api/acme/jobs/<id>
 ```
 
 `GET /api/acme/dead` lists dead letters, and
@@ -194,8 +225,8 @@ cache under `health/<endpoint>`.
 | 2 | Retries, pausing, backoff, dead letters | An endpoint down for an hour gets everything back in order | Done |
 | 3 | Many sources and endpoints, ordered and unordered | One slow endpoint does not delay the others | Done |
 | 4 | Replay and redrive | Any endpoint replays a time range from the log | Done |
-| 5 | Tenants, narrowed tokens, the admin page | Tenant isolation enforced by the broker | |
-| 6 | Crash and failover tests, performance targets | Nothing acknowledged is lost | |
+| 5 | Tenants, narrowed tokens, the admin page | Tenant isolation enforced by the broker | Done |
+| 6 | Crash and failover tests, performance targets | Nothing acknowledged is lost | Done |
 | 7 | Images, compose, Helm, a self-hosting guide | Anyone can self-host it | |
 
 Each milestone is a [GitHub milestone](https://github.com/gabloe/felix-webhook-relay/milestones)

@@ -554,17 +554,23 @@ sequenceDiagram
     participant I as IdP
     participant C as Control plane
     participant F as Broker
-    R->>I: client credentials
-    I-->>R: service token
+    I-->>R: service ID token, in a file
+    R->>R: read RELAY_IDP_TOKEN_FILE
     R->>C: exchange(service token, narrowed to namespace:relay/acme)
     C-->>R: Felix token for acme only
     R->>F: connect for acme with that token
 ```
 
-1. Each relay process authenticates as a service principal at the deployment's IdP with the client credentials grant.
-2. For each tenant it serves, it exchanges that token at the Felix control plane, narrowing to `namespace:relay/<tenant>` and to the actions its role needs: intake asks for `stream.publish`, `cache.read`, `cache.write`; delivery for `stream.subscribe` (which includes `group.consume`), `stream.publish`, `cache.read`, `cache.write`; admin adds `group.manage`, to redrive and discard Felix's group dead letters.
+1. Each relay process holds an ID token for its service principal, read from `RELAY_IDP_TOKEN_FILE`. The plan was the client credentials grant, but Felix accepts only IdP ID tokens at the exchange and has no client-credentials path of its own ([felix#954](https://github.com/gabloe/felix/issues/954)), so whatever the deployment's IdP offers machines (client credentials, a workload identity, a sidecar) writes the file, and the relay reads it again before every exchange.
+2. For each tenant it serves, it exchanges that token at the Felix control plane with `{"requested": [actions], "resources": ["namespace:relay/<tenant>"]}`, narrowing to the tenant's namespace and to the actions its role needs: intake asks for `stream.publish`, `cache.read`, `cache.write`; delivery for `stream.subscribe` (which includes `group.consume`), `stream.publish`, `cache.read`, `cache.write`; admin adds `group.manage`, to redrive and discard Felix's group dead letters.
 3. The control plane cuts a `stream:relay/*/*` grant down to `stream:relay/<tenant>/*` (`services/felix-controlplane-service/src/auth/rbac/authorize.rs`, `narrow_object`). The narrowing survives refresh (`docs/auth.md`, refresh).
-4. The process opens one Felix connection per tenant with that token.
+4. The process opens one Felix connection per tenant with that token, through felix-client's `RefreshingToken`, which exchanges again before the token ends.
+
+`felix-relay token <tenant>` prints the token a process would connect with,
+so demonstration 7 takes the relay's own token and tries it against the
+broker directly: every publish, subscribe, poll, cache read, cache write and
+counter on another tenant is refused, and the same calls on its own tenant
+work.
 
 So a bug that routes tenant A's work through tenant B's connection is refused
 by the broker, not caught by an `if`. Demonstration 7 tests that against the
@@ -582,13 +588,23 @@ read every endpoint's config. Per-endpoint isolation inside a tenant is out of
 scope for that reason.
 
 **Admins sign in with the IdP too.** The admin role uses the authorization code
-flow server-side, with the session in an encrypted cookie, so it stores
-nothing. Each request exchanges the admin's token narrowed to the tenant they
-opened. Who may administer a tenant is a Felix RBAC role,
-`role:relay-tenant-<tenant>`, granting the namespace's streams and caches plus
-`stream.manage` and `cache.manage` for creating sources. The control plane
-refuses the exchange for anyone else, the same model as felix-canvas's
-per-room roles.
+flow server-side, with the session in a cookie sealed under
+`RELAY_SECRET_KEY`, so it stores nothing. The cookie holds the ID token; the
+relay reads its claims without checking the signature, because the token came
+straight from the IdP's token endpoint and the control plane checks it on
+every exchange anyway. Each request exchanges the admin's token narrowed to
+the tenant they opened, and the Felix connection made with it is kept in
+memory for five minutes, so a page load does not cost a handshake, then
+exchanged again, so a revoked role ends access within minutes. The claims
+only name the admin on the page; which tenant a request acts on comes from
+its path, and whether it may is the exchange's answer.
+Scripts send an ID token as a bearer token instead of the cookie. Who may
+administer a tenant is a Felix RBAC role, `role:relay-tenant-<tenant>`,
+granting the namespace's streams and caches plus `stream.manage`,
+`cache.manage` and `group.manage`. The control plane refuses the exchange for
+anyone else (`403`, "no permissions"), and the page shows that refusal as it
+came, the same model as felix-canvas's per-room roles. The dev stack signs
+admins in with Dex.
 
 **Creating a source creates Felix resources.** Streams and caches are created
 only through the control plane's REST API
@@ -621,14 +637,15 @@ at build time beyond crates.
 | `GET /api/<tenant>/events/<source>/<offset>` | One event, its envelope, and its recent attempts |
 | `GET /healthz`, `GET /metrics` | Liveness and Prometheus metrics, per role |
 
-**The JSON API comes before the page and sign-in.** Sources and endpoints
-have to be written somewhere from M1 on, so the routes that write them land
-first, with no sign-in and the relay's own Felix connection. Until sign-in
-lands, a process running the admin role refuses a non-loopback `RELAY_LISTEN`
-unless `RELAY_ADMIN_ALLOW_PUBLIC=true` says something in front of it
-authenticates. A secret given to the
-API is sealed before it is written and never shown again; one the relay makes
-up is shown once, in the answer that created it.
+A secret given to the API is sealed before it is written and never shown
+again; one the relay makes up is shown once, in the answer that created it.
+The page sends its forms to the same API with a few lines of script, so there
+is one implementation of every action. "Retry now" is a job of its own,
+`{"type": "retry"}`, because the endpoint's worker may be another process: the
+worker takes it at its next backoff wait and marks it done. Counts are Felix
+counters in `stats`, added without waiting: `received/<source>`,
+`delivered/<endpoint>`, `failed/<endpoint>` (attempts that were not `2xx`)
+and `dead/<endpoint>`.
 
 **Lag is computed, not read.** Felix has no client call for a group's cursor
 (`committed` is broker-internal, `reader.rs`). Each worker writes its last
@@ -691,10 +708,18 @@ The poll histogram uses intake's clock against the worker's, so across hosts
 it includes their clock skew.
 
 **Intake throughput needs batching.** An idempotent producer serialises its
-publishes to a stream, and intake has one producer per process, so today it
-appends one webhook per broker round trip. The 5,000 per second target needs
-concurrent webhooks gathered into one `publish_batch`, which takes one
-sequence whatever its size. That is M6 work; M0 appends one at a time.
+publishes to a stream, and intake has one producer per process, so one
+webhook per append would mean one broker round trip each. Intake hands every
+append to one task per connection, which gathers whatever arrived while the
+previous batch was in flight into one `publish_batch` (one sequence, records at
+consecutive offsets). Measured results, with their conditions, are in
+[performance.md](performance.md).
+
+**Group operations per source are the ceiling.** Each delivery is a poll and an
+acknowledgement on the source's one shard, each committed before it answers,
+so all of a source's endpoints share that shard's rate: about 500 deliveries a
+second on a single shared host with fsync on commit. A source should not carry
+hundreds of busy endpoints.
 
 ## Build order
 
@@ -749,7 +774,7 @@ real brokers.
 - Retention set too short. Then outages and replays lose events. The relay warns, but it cannot change the broker's setting.
 - Static assignment misconfigured. Two workers on one index break ordering. Detected, not prevented.
 - The 30 s restart pause. Every deploy stalls every endpoint for 30 s until felix#962 lands. Acceptable for webhooks, but visible.
-- Group walk on endpoint creation. A long-retained source makes creating an endpoint expensive until Felix can start a group at an offset.
+- Group walk on endpoint creation. A long-retained source makes creating an endpoint expensive until Felix can start a group at an offset: about 1,000 records a second on one host, so a source holding ten million records takes hours to walk. The relay acknowledges each poll's skipped records together, which is as fast as one shard commits them.
 
 **Felix gaps this design works around:**
 
@@ -763,7 +788,11 @@ real brokers.
 | No consumer group deletion | Leave idle groups behind | Not filed |
 | No offset-for-time on the native API, and consumers never see the append timestamp | `received_at` in the envelope and a binary search over the log | Not filed |
 | No conditional cache put | Idempotency check races; static endpoint assignment; last-writer-wins config | Not filed |
-| Retention is broker-wide only | Document it and warn | Not filed |
+| Retention is broker-wide only | Warn at startup and on the admin page when a trimmed source's oldest record is younger than `RELAY_DISABLE_AFTER` plus `RELAY_REPLAY_WINDOW` | Not filed |
+| A dropped subscription keeps its stream until the broker next writes to it, so quiet streams leak them up to the connection's 1,024 | Short reads go through a connection that is replaced every 400 subscriptions | Not filed |
+| A waiting group poll holds a stream, so a thousand idle endpoints fill a connection | Group traffic is spread over four connections per tenant | Not filed |
+| No batched acknowledgement: one request, and one commit, per record | None; it bounds deliveries per source (see [performance.md](performance.md)) | Not filed |
+| A restarted broker generates a new self-signed certificate | The dev stack makes one certificate for every broker | By design (production brokers are given one) |
 | Segment size and preallocation are broker-wide, so each stream reserves a full segment | Document the disk cost per source; dev stack turns preallocation off | Not filed |
 | Streams and caches created only through the control plane | The admin role calls the REST API | By design |
 | Offsets on acks need a broker-wide setting | Idempotent producer returns them | [felix#956](https://github.com/gabloe/felix/issues/956) |

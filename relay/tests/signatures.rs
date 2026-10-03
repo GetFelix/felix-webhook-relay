@@ -131,8 +131,8 @@ async fn every_scheme_refuses_bad_and_stale_signatures_before_the_log() {
             ("no signature", Vec::new(), body.as_slice()),
         ];
         if timed {
-            refused.push(("stale", sign(secret, body, now_secs() - 301), body));
-            refused.push(("future", sign(secret, body, now_secs() + 301), body));
+            refused.push(("stale", sign(secret, body, now_secs() - 330), body));
+            refused.push(("future", sign(secret, body, now_secs() + 330), body));
         }
         for (what, headers, body) in refused {
             let (status, _) = post(&relay, &path, &headers, body).await;

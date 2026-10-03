@@ -3,6 +3,7 @@
 // Each test binary uses a different part of this.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -23,6 +24,49 @@ pub const WAIT: Duration = Duration::from_secs(60);
 /// The `RELAY_SECRET_KEY` every test relay runs with.
 pub const SECRET_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 pub const TENANT: &str = "acme";
+/// The dev stack's Dex, where the tests' admins sign in.
+pub const DEX: &str = "http://127.0.0.1:5556/dex";
+/// Administers `acme`; `bob@example.com` administers `globex`, and
+/// `carol@example.com` nothing.
+pub const ALICE: &str = "alice@example.com";
+
+/// An ID token for a Dex user, by password, as a script would get one.
+/// Kept per user for the run, so the relay sees one admin session each.
+pub async fn id_token(email: &str) -> String {
+    static TOKENS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    if let Some(token) = TOKENS.lock().unwrap().get_or_insert_default().get(email) {
+        return token.clone();
+    }
+    let token = fresh_id_token(email).await;
+    TOKENS
+        .lock()
+        .unwrap()
+        .get_or_insert_default()
+        .insert(email.to_string(), token.clone());
+    token
+}
+
+async fn fresh_id_token(email: &str) -> String {
+    let answer: Value = reqwest::Client::new()
+        .post(format!("{DEX}/token"))
+        .basic_auth("relay-admin", Some("dev-admin-secret"))
+        .form(&[
+            ("grant_type", "password"),
+            ("username", email),
+            ("password", "password"),
+            ("scope", "openid email profile"),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    answer["id_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no ID token for {email}: {answer}"))
+        .to_string()
+}
 const CONTROL_PLANE: &str = "http://127.0.0.1:8443";
 
 /// An id unique to one test run. Streams and groups outlive a test, so
@@ -83,15 +127,22 @@ impl Relay {
             !roles.contains("deliver") || env.iter().any(|(n, _)| *n == "RELAY_ENDPOINT_PREFIXES"),
             "a delivery process in a test needs RELAY_ENDPOINT_PREFIXES"
         );
-        let addr = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        let addr = match env.iter().find(|(name, _)| *name == "RELAY_LISTEN") {
+            Some((_, listen)) => listen.parse().unwrap(),
+            None => TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap(),
+        };
         let mut command = Command::new(env!("CARGO_BIN_EXE_felix-relay"));
         command
             .env("RELAY_LISTEN", addr.to_string())
             .env("RELAY_ROLES", roles)
             .env("RELAY_SECRET_KEY", SECRET_KEY)
+            .env("RELAY_IDP_TOKEN_FILE", state_dir().join("relay-idp.token"))
+            .env("RELAY_OIDC_ISSUER", DEX)
+            .env("RELAY_OIDC_CLIENT_ID", "relay-admin")
+            .env("RELAY_OIDC_CLIENT_SECRET", "dev-admin-secret")
             // Every test's group is new, so there are no earlier claims to wait out.
             .env("RELAY_CLAIM_WAIT_MS", "0");
         for (name, value) in env {
@@ -118,24 +169,48 @@ impl Relay {
         format!("http://{}{path}", self.addr)
     }
 
-    /// An admin API call that must succeed; returns its JSON answer.
+    /// An admin API call on `acme` as alice that must succeed; returns its
+    /// JSON answer.
     pub async fn admin(&self, method: reqwest::Method, path: &str, body: Value) -> Value {
-        let response = self
-            .http
-            .request(method.clone(), self.url(&format!("/api/{TENANT}{path}")))
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
+        self.admin_as(ALICE, TENANT, method, path, body).await
+    }
+
+    pub async fn admin_as(
+        &self,
+        who: &str,
+        tenant: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Value,
+    ) -> Value {
+        let response = self.call_as(who, tenant, method.clone(), path, body).await;
         let status = response.status();
         let text = response.text().await.unwrap();
         assert!(status.is_success(), "{method} {path} -> {status}: {text}");
         serde_json::from_str(&text).unwrap_or(Value::Null)
     }
 
-    /// Create a source and its stream; returns its secret when the relay made one up.
+    /// An admin API call as `who` on `tenant`, whatever its answer.
+    pub async fn call_as(
+        &self,
+        who: &str,
+        tenant: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Value,
+    ) -> reqwest::Response {
+        self.http
+            .request(method, self.url(&format!("/api/{tenant}{path}")))
+            .bearer_auth(id_token(who).await)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Create a source, which creates its stream; returns its secret when the
+    /// relay made one up.
     pub async fn create_source(&self, id: &str, config: Value) -> Option<String> {
-        create_stream(&format!("src.{id}")).await;
         let answer = self
             .admin(reqwest::Method::PUT, &format!("/sources/{id}"), config)
             .await;
@@ -285,8 +360,8 @@ impl Endpoint {
 }
 
 fn state_dir() -> PathBuf {
-    let token = std::env::var("RELAY_FELIX_TOKEN_FILE").expect("RELAY_FELIX_TOKEN_FILE");
-    PathBuf::from(token).parent().unwrap().to_path_buf()
+    let ca = std::env::var("RELAY_FELIX_CA_FILE").expect("RELAY_FELIX_CA_FILE");
+    PathBuf::from(ca).parent().unwrap().to_path_buf()
 }
 
 /// A client on the development broker with the relay's token.
