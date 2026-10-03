@@ -10,18 +10,16 @@
 //! hand; the late acknowledgement settles it.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use felix_client::ClusterClient;
 use felix_relay_core::Envelope;
 use felix_relay_core::catalog::{Disabled, Endpoint, Mode, endpoint_key};
-use felix_relay_core::health::{Decision, Health, Outcome, State, parse_retry_after};
-use felix_relay_core::records::{Attempt, DeadLetter, RESPONSE_SNIPPET_BYTES};
-use felix_relay_core::signature::standard_signature;
+use felix_relay_core::health::{Decision, Health, Outcome, State};
 use futures_util::future::join_all;
-use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 
+use super::send::{Answer, FELIX_RETRY, Sender, jitter};
 use crate::catalog::CONFIG;
 use crate::report::Reporter;
 use crate::{App, unix_millis};
@@ -30,17 +28,6 @@ use crate::{App, unix_millis};
 const ORDERED_BATCH: u32 = 16;
 /// How long the broker may hold a poll open waiting for work.
 const POLL_WAIT: Duration = Duration::from_secs(10);
-/// The pause before retrying a failed call to Felix.
-const FELIX_RETRY: Duration = Duration::from_secs(1);
-
-/// The answer to one request, as much of it as the relay keeps.
-struct Answer {
-    status: Option<u16>,
-    retry_after: Option<Duration>,
-    detail: String,
-    at: u64,
-    millis: u64,
-}
 
 /// A record in hand, not yet settled.
 struct Held {
@@ -60,7 +47,7 @@ pub(super) struct Task {
     mode: Mode,
     window: u32,
     reporter: Reporter,
-    http: reqwest::Client,
+    sender: Sender,
     health: Health,
     /// Set between deciding to disable the endpoint and seeing that in config.
     disabling: bool,
@@ -77,7 +64,12 @@ impl Task {
             group: format!("ep.{id}"),
             mode: endpoint.mode,
             window: endpoint.in_flight(),
-            http,
+            sender: Sender {
+                app: Arc::clone(&app),
+                endpoint: id.to_string(),
+                source: endpoint.source.clone(),
+                http,
+            },
             health: Health::default(),
             disabling: false,
             last_offset: None,
@@ -102,6 +94,7 @@ impl Task {
             Mode::Unordered => self.window,
         };
         loop {
+            self.wait_for_jobs_that_pause_live().await?;
             let polled = self
                 .felix()
                 .group_poll_wait(
@@ -145,6 +138,19 @@ impl Task {
         }
     }
 
+    async fn wait_for_jobs_that_pause_live(&self) -> Result<()> {
+        let mut jobs = self.app.jobs.clone();
+        while jobs
+            .borrow_and_update()
+            .0
+            .values()
+            .any(|job| job.endpoint == self.endpoint && job.pauses_live())
+        {
+            jobs.changed().await.context("the job watch stopped")?;
+        }
+        Ok(())
+    }
+
     /// A polled record to send, or `None` for one to acknowledge unsent.
     async fn take(&mut self, offset: u64, payload: &[u8], polled_at: u64) -> Result<Option<Held>> {
         if let Some(last) = self.last_offset
@@ -184,23 +190,22 @@ impl Task {
     async fn settle(&mut self, mut held: Vec<Held>) -> Result<()> {
         while !held.is_empty() {
             let endpoint = self.enabled().await?;
-            let answers = join_all(
-                held.iter()
-                    .map(|record| self.send(&endpoint, &record.id, &record.envelope)),
-            )
+            let answers = join_all(held.iter().map(|record| {
+                self.sender
+                    .send(&endpoint, &record.id, &record.envelope, None)
+            }))
             .await;
             let outcomes: Vec<Outcome> = answers
                 .iter()
                 .map(|answer| Outcome::classify(answer.status, answer.retry_after))
                 .collect();
             let mut refusals: Vec<usize> = held.iter().map(|record| record.refusals).collect();
-            let jitter = f64::from(unix_millis() as u32 % 1000) / 1000.0;
             let before = self.health.state;
             let decisions = self.health.decide_window(
                 &outcomes,
                 &mut refusals,
                 unix_millis(),
-                jitter,
+                jitter(),
                 &self.app.config.policy,
             );
             self.report(before, &outcomes, &answers);
@@ -213,12 +218,13 @@ impl Task {
             {
                 record.tries += 1;
                 record.refusals = refusals;
-                self.log_attempt(record.offset, &record.id, &answer);
+                self.sender.log_attempt(record.offset, &record.id, &answer);
                 match decision {
                     Decision::Ack => self.ack(record.offset).await,
                     Decision::DeadLetter => {
                         let offset = record.offset;
-                        self.dead_letter(offset, record.envelope, record.tries, answer)
+                        self.sender
+                            .dead_letter(offset, record.envelope, record.tries, answer)
                             .await;
                         self.ack(offset).await;
                     }
@@ -329,125 +335,6 @@ impl Task {
             }
         }
         self.disabling = true;
-    }
-
-    /// One signed request. The caller reads the endpoint's config afresh for
-    /// every attempt, so a URL change or a secret rotation applies to the next.
-    async fn send(&self, endpoint: &Endpoint, id: &str, envelope: &Envelope) -> Answer {
-        let at = unix_millis();
-        let started = Instant::now();
-        let result = self.request(endpoint, id, envelope, at).await;
-        let elapsed = started.elapsed();
-        self.app.metrics.outbound.record(elapsed);
-        let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-        match result {
-            Ok(mut response) => {
-                let retry_after = response
-                    .headers()
-                    .get(RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(parse_retry_after);
-                let mut snippet = Vec::new();
-                while snippet.len() < RESPONSE_SNIPPET_BYTES {
-                    match response.chunk().await {
-                        Ok(Some(chunk)) => snippet.extend_from_slice(&chunk),
-                        _ => break,
-                    }
-                }
-                snippet.truncate(RESPONSE_SNIPPET_BYTES);
-                Answer {
-                    status: Some(response.status().as_u16()),
-                    retry_after,
-                    detail: String::from_utf8_lossy(&snippet).into_owned(),
-                    at,
-                    millis,
-                }
-            }
-            Err(err) => Answer {
-                status: None,
-                retry_after: None,
-                detail: format!("{err:#}"),
-                at,
-                millis,
-            },
-        }
-    }
-
-    async fn request(
-        &self,
-        endpoint: &Endpoint,
-        id: &str,
-        envelope: &Envelope,
-        now: u64,
-    ) -> Result<reqwest::Response> {
-        let timestamp = now / 1000;
-        let key = &self.app.config.secret_key;
-        let name = endpoint_key(&self.endpoint);
-        let mut secrets = vec![key.open(&name, &endpoint.secret)?];
-        if let Some(previous) = endpoint.previous_secret.as_ref().filter(|p| p.until > now) {
-            secrets.push(key.open(&name, &previous.secret)?);
-        }
-        let signatures = secrets
-            .iter()
-            .map(|secret| standard_signature(secret, id, timestamp, &envelope.body))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(" ");
-        let mut request = self
-            .http
-            .post(&endpoint.url)
-            .header("webhook-id", id)
-            .header("webhook-timestamp", timestamp.to_string())
-            .header("webhook-signature", signatures)
-            .body(envelope.body.clone());
-        if let Some(content_type) = &envelope.content_type {
-            request = request.header(CONTENT_TYPE, content_type);
-        }
-        Ok(request.send().await?)
-    }
-
-    /// The trail of attempts is not a source of truth, so it is published
-    /// without waiting for the broker.
-    fn log_attempt(&self, offset: u64, id: &str, answer: &Answer) {
-        let attempt = Attempt {
-            endpoint: self.endpoint.clone(),
-            offset,
-            event_id: id.to_string(),
-            at: answer.at,
-            millis: answer.millis,
-            status: answer.status,
-            detail: answer.detail.clone(),
-        };
-        let felix = Arc::clone(&self.app.felix);
-        tokio::spawn(async move {
-            if let Err(err) = felix.publish_unacked("attempts", attempt.encode()).await {
-                tracing::debug!("attempt not logged: {err:#}");
-            }
-        });
-    }
-
-    /// Store the record in the `dead` stream. Only once it is stored may the
-    /// record be acknowledged, or a crash in between would lose it.
-    async fn dead_letter(&self, offset: u64, envelope: Envelope, attempts: u32, answer: Answer) {
-        let dead = DeadLetter {
-            endpoint: self.endpoint.clone(),
-            source: self.source.clone(),
-            offset,
-            at: unix_millis(),
-            attempts,
-            last_status: answer.status,
-            last_response: answer.detail,
-            envelope,
-        };
-        tracing::warn!(endpoint = %self.endpoint, offset, "dead-lettered");
-        while let Err(err) = self
-            .app
-            .felix
-            .append("dead".to_string(), dead.encode())
-            .await
-        {
-            tracing::warn!(offset, "could not store a dead letter: {err:#}");
-            tokio::time::sleep(FELIX_RETRY).await;
-        }
     }
 
     async fn ack(&self, offset: u64) {
