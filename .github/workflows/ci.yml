@@ -59,3 +59,29 @@ jobs:
       - name: Felix logs
         if: failure()
         run: docker compose -f dev/docker-compose.yml logs
+
+  # The design's demonstrations at full size. Not a required check: they
+  # take minutes, and the integration job already runs each one small.
+  demonstrations:
+    name: demonstrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the tests
+        run: cargo test --locked --no-run
+      - name: Start Felix
+        run: dev/up.sh
+      - name: Outage, 10,000 webhooks
+        env:
+          RELAY_TEST_WEBHOOKS: "10000"
+          RELAY_TEST_OUTAGE: 60s
+        run: |
+          export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
+          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
+          cargo test --locked --test outage -- --include-ignored an_endpoint_that_was_down
+      - name: Felix logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml logs

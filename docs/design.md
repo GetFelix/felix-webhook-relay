@@ -369,13 +369,14 @@ Failures split by what they say about the endpoint:
 | Response | Reads as | What happens |
 |---|---|---|
 | `2xx` | Delivered | Acknowledge |
-| `400` to `499`, except `408`, `425`, `429` | This record is refused | Retry at 0 s, 5 s, 30 s. Then dead-letter it and move on |
+| `400` to `499`, except `408`, `425`, `429` | This record is refused | Try it three times: at once, after 5 s, and after 30 s more. Then dead-letter it and move on |
 | `408`, `425`, `429`, `5xx`, timeout, connection error | The endpoint is unwell | Pause the endpoint and probe with the same record on the backoff schedule |
 | `410 Gone` | The endpoint is retired | Disable the endpoint at once |
 
 **Backoff is per endpoint.** A paused endpoint probes with its head record at
 5 s, 15 s, 1 min, 2 min, then every 5 minutes, each with up to 20% jitter. A
-`Retry-After` header within an hour is honoured. While paused it polls
+`Retry-After` header in seconds and within an hour is honoured; the
+HTTP-date form falls back to the schedule. While paused it polls
 nothing, so its group's cursor holds still and its backlog grows in the log at
 no cost. When a probe succeeds, it delivers what it holds and resumes polling.
 An operator can press "retry now" on the admin page to skip the wait.
@@ -393,6 +394,20 @@ resumes delivery from there, provided retention has not removed them. That
 proviso is the honest limit of the design: **broker retention must exceed the
 disable window plus the replay window**, and the relay checks the gap it can
 see (it warns when the oldest record it can read is younger than the window).
+
+Disabling is written where an operator sees it: the worker sets `disabled`
+(a reason and a time) on the endpoint's config entry, and
+`POST /api/<tenant>/endpoints/<id>/enable` clears it. Meanwhile the worker
+keeps the records it had claimed in hand and polls nothing, so enabling
+resumes with the record that failed, from the cursor.
+
+**What a worker writes.** One `Attempt` per request to `attempts`, published
+with no acknowledgement, since it is a trail and not a record of truth. One
+`DeadLetter` per given-up record to `dead`, through the idempotent producer,
+before the record is acknowledged. And `state/health/<endpoint>` as JSON
+every 3 s and at once on a state change: the state, when the current run of
+failures began, the last error, the last acknowledged offset, the gaps it
+has seen (felix#963) and which process reported it.
 
 Each request times out after 15 s by default. Deliveries never follow
 redirects.
@@ -565,6 +580,7 @@ at build time beyond crates.
 | `POST /api/<tenant>/endpoints`, `PUT`, `DELETE` | Manage endpoints, including mode, window, filter, `start_offset` |
 | `POST /api/<tenant>/endpoints/<id>/secret` | Rotate a signing secret |
 | `POST /api/<tenant>/endpoints/<id>/retry` | Skip the backoff wait |
+| `POST /api/<tenant>/endpoints/<id>/enable` | Enable a disabled endpoint |
 | `POST /api/<tenant>/endpoints/<id>/replays` | Start a replay over a time or offset range |
 | `GET /api/<tenant>/dead`, `POST .../redrive`, `POST .../discard` | Both kinds of dead letter |
 | `GET /api/<tenant>/events/<source>/<offset>` | One event, its envelope, and its recent attempts |
@@ -682,7 +698,9 @@ Mirrors felix-canvas's packaging, in M7:
 
 A standalone dev broker reads its node token once, so the dev stack sets
 `FELIX_EXCHANGE_TOKEN_TTL_SECONDS=86400` as felix-canvas does
-([felix#955](https://github.com/gabloe/felix/issues/955)).
+([felix#955](https://github.com/gabloe/felix/issues/955)). It also sets
+`FELIX_GROUP_VISIBILITY_TIMEOUT_MS=5000`, so tests see claims lapse while a
+worker retries, and a relay on it can use `RELAY_CLAIM_WAIT_MS=5000`.
 
 ## Risks, and what this surfaces in Felix
 

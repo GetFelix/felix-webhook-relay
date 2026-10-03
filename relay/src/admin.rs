@@ -32,6 +32,7 @@ pub(crate) fn routes() -> axum::Router<Arc<App>> {
             put(put_endpoint).get(get_endpoint).delete(delete_endpoint),
         )
         .route("/api/{tenant}/endpoints/{id}/secret", post(rotate_secret))
+        .route("/api/{tenant}/endpoints/{id}/enable", post(enable_endpoint))
 }
 
 /// A failed admin request: a status and a message for the operator.
@@ -204,6 +205,7 @@ async fn put_endpoint(
         _ => return Err(bad_request("url must be an http or https URL")),
     }
     let existing: Option<Endpoint> = read(&app, &key).await?;
+    let disabled = existing.as_ref().and_then(|e| e.disabled.clone());
     let mut generated = None;
     let (secret, previous_secret) = match (input.secret, existing) {
         (Some(secret), existing) => {
@@ -226,6 +228,7 @@ async fn put_endpoint(
         url: input.url,
         secret,
         previous_secret,
+        disabled,
     };
     write(&app, &key, &endpoint).await?;
     let mut shown = shown(&id, &endpoint);
@@ -288,4 +291,16 @@ async fn rotate_secret(
     });
     write(&app, &key, &endpoint).await?;
     Ok(Json(json!({ "id": id, "secret": secret, "rotating_until": until })).into_response())
+}
+
+/// Clear a disabled endpoint. Its worker resumes from the group's cursor.
+async fn enable_endpoint(
+    State(app): State<Arc<App>>,
+    Path((tenant, id)): Path<(String, String)>,
+) -> ApiResult {
+    let key = entry_key(&app, &tenant, &id, endpoint_key)?;
+    let mut endpoint: Endpoint = read(&app, &key).await?.ok_or_else(not_found)?;
+    endpoint.disabled = None;
+    write(&app, &key, &endpoint).await?;
+    Ok(Json(shown(&id, &endpoint)).into_response())
 }

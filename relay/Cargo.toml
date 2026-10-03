@@ -13,6 +13,7 @@ axum = "0.8"
 hex = "0.4"
 felix-client = "0.6.0-preview"
 felix-relay-core.workspace = true
+felix-wire = "0.6.0-preview"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rustls = "0.23"
 serde.workspace = true

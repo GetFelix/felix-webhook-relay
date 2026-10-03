@@ -14,12 +14,16 @@ durably before answering. It delivers each one to its endpoints, signed, with
 retries and backoff. It sets aside what an endpoint keeps refusing, and it can
 replay any endpoint over a time range after an outage.
 
-**Status: M1 done.** Sources and endpoints live in Felix, written through
+**Status: M2 done.** Sources and endpoints live in Felix, written through
 the admin API with their secrets sealed. Intake verifies Standard Webhooks,
 GitHub, Stripe and generic HMAC signatures before anything is stored, and
 dedupes retries on the sender's event id. Deliveries are signed with
-Standard Webhooks and go to one endpoint per delivery process, in order.
-Retries with backoff, dead letters and everything after are still to come.
+Standard Webhooks and go to one endpoint per delivery process, in order. An
+endpoint that is down pauses and probes on a backoff schedule while its
+backlog waits in the log, a record it keeps refusing goes to the `dead`
+stream, and an endpoint that answers `410` or fails for three days is
+disabled until an operator enables it. Many endpoints, replay and the admin
+page are still to come.
 The design and the plan are in [docs/design.md](docs/design.md).
 
 ## Why it exists
@@ -145,10 +149,20 @@ cargo test -- --include-ignored
 | `RELAY_FELIX_TENANT` | `relay` | The Felix tenant of the deployment |
 | `RELAY_TENANT` | `acme` | The relay tenant, which is a Felix namespace |
 | `RELAY_ENDPOINT` | `demo` | The endpoint this process delivers to; its consumer group is `ep.<id>` |
+| `RELAY_CLAIM_WAIT_MS` | `30000` | Wait before the first poll; at least the broker's `FELIX_GROUP_VISIBILITY_TIMEOUT_MS` (5000 on the dev stack) |
+| `RELAY_BACKOFF` | `5s,15s,1m,2m,5m` | Waits between probes of a paused endpoint; the last repeats |
+| `RELAY_REFUSED_RETRIES` | `5s,30s` | Waits before each retry of a refused record, then it is dead-lettered |
+| `RELAY_DISABLE_AFTER` | `72h` | How long an endpoint may fail without a break before it is disabled |
+| `RELAY_WORKER_NAME` | host name and pid | Names this process in endpoint health entries |
 
 `GET /metrics` serves three Prometheus histograms, one per hop:
 `relay_intake_ack_seconds`, `relay_poll_wakeup_seconds` and
-`relay_outbound_request_seconds`.
+`relay_outbound_request_seconds`, and a counter of group polls,
+`relay_group_polls_total`, which stands still while an endpoint is paused.
+
+A disabled endpoint is enabled again with
+`POST /api/<tenant>/endpoints/<id>/enable`, and its health is in the `state`
+cache under `health/<endpoint>`.
 
 ## Build order
 
@@ -156,7 +170,7 @@ cargo test -- --include-ignored
 |---|---|---|---|
 | 0 | One source, one endpoint, through Felix | A webhook goes in and comes out | Done |
 | 1 | Signatures in and out, idempotency keys | Senders are verified, deliveries verify with standard libraries | Done |
-| 2 | Retries, pausing, backoff, dead letters | An endpoint down for an hour gets everything back in order | |
+| 2 | Retries, pausing, backoff, dead letters | An endpoint down for an hour gets everything back in order | Done |
 | 3 | Many sources and endpoints, ordered and unordered | One slow endpoint does not delay the others | |
 | 4 | Replay and redrive | Any endpoint replays a time range from the log | |
 | 5 | Tenants, narrowed tokens, the admin page | Tenant isolation enforced by the broker | |
