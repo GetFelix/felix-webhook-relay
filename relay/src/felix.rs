@@ -1,4 +1,4 @@
-//! The relay's Felix connection and its idempotent appends.
+//! The relay's Felix connection: idempotent appends and the caches.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,8 +17,8 @@ const APPEND_ATTEMPTS: u32 = 5;
 
 pub(crate) struct Felix {
     /// Lives as long as the process, which lets the producer borrow it.
-    client: &'static ClusterClient,
-    /// The Felix tenant and the namespace every stream and group lives in.
+    client: &'static Arc<ClusterClient>,
+    /// The Felix tenant and the namespace every stream, group and cache lives in.
     pub(crate) tenant: String,
     pub(crate) namespace: String,
     producer: Mutex<Option<IdempotentProducer<'static>>>,
@@ -38,9 +38,8 @@ impl Felix {
             }
             None => None,
         };
-        let token_file = config.token_file.as_ref().context("no Felix token file")?;
-        let token = std::fs::read_to_string(token_file)
-            .with_context(|| format!("read {}", token_file.display()))?;
+        let token = std::fs::read_to_string(&config.token_file)
+            .with_context(|| format!("read {}", config.token_file.display()))?;
 
         let quic = felix_client::quic_client_config(roots, true)?;
         let mut client_config = ClientConfig::optimized_defaults(quic);
@@ -50,15 +49,59 @@ impl Felix {
             .await
             .context("connect to Felix")?;
         Ok(Self {
-            client: Box::leak(Box::new(client)),
+            client: Box::leak(Box::new(Arc::new(client))),
             tenant: config.felix_tenant.clone(),
             namespace: config.tenant.clone(),
             producer: Mutex::new(None),
         })
     }
 
-    pub(crate) fn client(&self) -> &ClusterClient {
+    pub(crate) fn client(&self) -> &'static Arc<ClusterClient> {
         self.client
+    }
+
+    pub(crate) async fn cache_get(&self, cache: &str, key: &str) -> Result<Option<Vec<u8>>> {
+        let value = self
+            .client
+            .client()
+            .await
+            .cache_get(&self.tenant, &self.namespace, cache, key)
+            .await
+            .with_context(|| format!("read {cache}/{key}"))?;
+        Ok(value.map(|bytes| bytes.to_vec()))
+    }
+
+    pub(crate) async fn cache_put(
+        &self,
+        cache: &str,
+        key: &str,
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    ) -> Result<()> {
+        let ttl_ms = ttl.map(|ttl| u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX));
+        self.client
+            .client()
+            .await
+            .cache_put(
+                &self.tenant,
+                &self.namespace,
+                cache,
+                key,
+                value.into(),
+                ttl_ms,
+            )
+            .await
+            .with_context(|| format!("write {cache}/{key}"))
+    }
+
+    pub(crate) async fn cache_delete(&self, cache: &str, key: &str) -> Result<()> {
+        self.client
+            .client()
+            .await
+            .cache_delete(&self.tenant, &self.namespace, cache, key)
+            .await
+            .with_context(|| format!("delete {cache}/{key}"))?;
+        Ok(())
     }
 
     /// Append one record to `stream` exactly once and return its offset.
