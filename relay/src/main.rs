@@ -19,7 +19,7 @@ use axum::extract::State;
 use axum::routing::get;
 use tracing_subscriber::EnvFilter;
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, Jobs};
 use crate::config::Config;
 use crate::felix::Felix;
 use crate::metrics::Metrics;
@@ -30,6 +30,8 @@ pub(crate) struct App {
     pub(crate) felix: Arc<Felix>,
     /// Every source and endpoint, kept current from Felix.
     pub(crate) catalog: tokio::sync::watch::Receiver<Arc<Catalog>>,
+    /// Replay and redrive jobs.
+    pub(crate) jobs: tokio::sync::watch::Receiver<Arc<Jobs>>,
     pub(crate) metrics: Metrics,
 }
 
@@ -42,10 +44,12 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     let felix = Arc::new(Felix::connect(&config).await?);
     let catalog = catalog::follow(Arc::clone(&felix)).await?;
+    let jobs = catalog::follow(Arc::clone(&felix)).await?;
     let app = Arc::new(App {
         config,
         felix,
         catalog,
+        jobs,
         metrics: Metrics::default(),
     });
     let roles = app.config.roles;

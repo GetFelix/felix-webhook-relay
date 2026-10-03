@@ -485,7 +485,13 @@ interleave. To find the first offset at or after time `T`, the admin role
 binary-searches the stream: subscribe from a midpoint offset, read one
 envelope, compare its `received_at`, repeat. A 10-million-record stream takes
 about 24 reads. The search aims at `T` minus five seconds, and the replay
-filters by `received_at`, so interleaving cannot drop an edge record.
+filters by `received_at`, so interleaving cannot drop an edge record. The end
+of a range is found the same way, aiming five seconds past it. Each read opens
+a subscription at the probe offset and takes the first record it gets, which
+also steps over offsets the broker never delivers. On the dev stack a read
+costs about 12 ms, so a million records resolve in about 250 ms. On a
+GitHub-hosted runner, 10 million records resolve in 137 to 341 ms with 23 or
+24 reads.
 
 A replay job is a cache entry, `state/job/<id>`: the endpoint, the offset
 range, the next offset, and a status. The endpoint's worker runs it with a
@@ -495,10 +501,22 @@ endpoint's current secret, adds `webhook-replay: <job>`, and writes the next
 offset back to the job every 100 records. A worker that dies resumes the job
 from its last checkpoint, so a replay repeats at most 100 records.
 
-Replays share the endpoint's rate, not its order. A replay runs at a quarter
-of the endpoint's window, or one request at a time for an ordered endpoint,
-interleaved with live traffic. Pausing live delivery during a replay is an
-option on the job, for receivers that need the replayed range to land first.
+Replays share the endpoint, not its order. A replay sends one request at a
+time, interleaved with live traffic, whatever the endpoint's mode; a quarter
+of an unordered endpoint's window was the plan, and one at a time proved
+enough to show replays and is simpler to bound. Its retries follow the same
+state machine as live delivery, except that it never disables the endpoint:
+it fails the job instead. Pausing live delivery during a replay is an option
+on the job (`pause_live`), for receivers that need the replayed range to land
+first; the live task then waits before its next poll. A finished job stays in
+the cache for a week, then expires.
+
+A redrive is a job too, `{"type": "redrive", "dead_offset": N}`. The worker
+reads the dead letter's envelope copy from `dead`, delivers it with the same
+event id and `webhook-replay: <job>`, and marks `state/dead/<N>` redriven.
+Discarding only writes the mark. Felix's own group dead letters are redriven
+or discarded with `group_redrive` and `group_discard`, which need
+`group.manage` on the source's stream.
 
 A replay cannot reach below retention. The admin page shows the oldest offset
 and time each source still holds.
@@ -544,7 +562,7 @@ sequenceDiagram
 ```
 
 1. Each relay process authenticates as a service principal at the deployment's IdP with the client credentials grant.
-2. For each tenant it serves, it exchanges that token at the Felix control plane, narrowing to `namespace:relay/<tenant>` and to the actions its role needs: intake asks for `stream.publish`, `cache.read`, `cache.write`; delivery for `stream.subscribe` (which includes `group.consume`), `stream.publish`, `cache.read`, `cache.write`.
+2. For each tenant it serves, it exchanges that token at the Felix control plane, narrowing to `namespace:relay/<tenant>` and to the actions its role needs: intake asks for `stream.publish`, `cache.read`, `cache.write`; delivery for `stream.subscribe` (which includes `group.consume`), `stream.publish`, `cache.read`, `cache.write`; admin adds `group.manage`, to redrive and discard Felix's group dead letters.
 3. The control plane cuts a `stream:relay/*/*` grant down to `stream:relay/<tenant>/*` (`services/felix-controlplane-service/src/auth/rbac/authorize.rs`, `narrow_object`). The narrowing survives refresh (`docs/auth.md`, refresh).
 4. The process opens one Felix connection per tenant with that token.
 
@@ -594,8 +612,12 @@ at build time beyond crates.
 | `POST /api/<tenant>/endpoints/<id>/secret` | Rotate a signing secret |
 | `POST /api/<tenant>/endpoints/<id>/retry` | Skip the backoff wait |
 | `POST /api/<tenant>/endpoints/<id>/enable` | Enable a disabled endpoint |
-| `POST /api/<tenant>/endpoints/<id>/replays` | Start a replay over a time or offset range |
-| `GET /api/<tenant>/dead`, `POST .../redrive`, `POST .../discard` | Both kinds of dead letter |
+| `POST /api/<tenant>/endpoints/<id>/replays` | Start a replay over a time (`since`, `until`, Unix ms) or offset (`from`, `to`) range |
+| `GET /api/<tenant>/jobs/<id>` | A replay or redrive job |
+| `GET /api/<tenant>/sources/<id>/offset?at=<ms>` | The first offset received at or after a time |
+| `GET /api/<tenant>/dead` | The newest 200 of the relay's dead letters with their marks, and Felix's group dead letters per endpoint |
+| `POST /api/<tenant>/dead/<offset>/redrive`, `.../discard` | Act on one of the relay's dead letters |
+| `POST /api/<tenant>/endpoints/<id>/broker-dead/<offset>/redrive`, `.../discard` | Act on one of Felix's |
 | `GET /api/<tenant>/events/<source>/<offset>` | One event, its envelope, and its recent attempts |
 | `GET /healthz`, `GET /metrics` | Liveness and Prometheus metrics, per role |
 
