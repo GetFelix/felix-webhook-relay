@@ -21,8 +21,11 @@ use serde_json::{Value, json};
 use crate::catalog::CONFIG;
 use crate::{App, unix_millis};
 
+mod jobs;
+
 pub(crate) fn routes() -> axum::Router<Arc<App>> {
     axum::Router::new()
+        .merge(jobs::routes())
         .route(
             "/api/{tenant}/sources/{id}",
             put(put_source).get(get_source).delete(delete_source),
@@ -80,7 +83,15 @@ fn entry_key(
 }
 
 async fn read<T: DeserializeOwned>(app: &App, key: &str) -> Result<Option<T>, ApiError> {
-    let Some(bytes) = app.felix.cache_get(CONFIG, key).await? else {
+    read_from(app, CONFIG, key).await
+}
+
+async fn read_from<T: DeserializeOwned>(
+    app: &App,
+    cache: &str,
+    key: &str,
+) -> Result<Option<T>, ApiError> {
+    let Some(bytes) = app.felix.cache_get(cache, key).await? else {
         return Ok(None);
     };
     let value = serde_json::from_slice(&bytes)

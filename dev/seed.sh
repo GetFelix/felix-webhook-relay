@@ -80,6 +80,7 @@ call POST "$BOOTSTRAP/internal/bootstrap/tenants/$TENANT/initialize" "$(jq -n \
       {subject: "role:broker", object: "cluster:*", action: "node.view"},
       {subject: "role:relay", object: $streams, action: "stream.publish"},
       {subject: "role:relay", object: $streams, action: "stream.subscribe"},
+      {subject: "role:relay", object: $streams, action: "group.manage"},
       {subject: "role:relay", object: $caches, action: "cache.read"},
       {subject: "role:relay", object: $caches, action: "cache.write"}
     ],
@@ -124,7 +125,7 @@ chmod 777 "$STATE"
 echo "$admin" >"$STATE/admin.token"
 exchange relay-broker '{"audience": "felix-controlplane"}' >"$STATE/node.token"
 exchange relay-service \
-  '{"requested": ["stream.publish", "stream.subscribe", "cache.read", "cache.write"]}' \
+  '{"requested": ["stream.publish", "stream.subscribe", "group.manage", "cache.read", "cache.write"]}' \
   >"$STATE/relay.token"
 chmod 644 "$STATE/node.token" "$STATE/relay.token" "$STATE/admin.token"
 echo "wrote node.token, relay.token and admin.token to $STATE"

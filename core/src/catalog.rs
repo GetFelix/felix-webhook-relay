@@ -88,9 +88,13 @@ fn default_window() -> u32 {
 impl Endpoint {
     /// Whether the record at `offset` with this event type is sent at all.
     pub fn wants(&self, offset: u64, event_type: Option<&str>) -> bool {
-        offset >= self.start_offset
-            && (self.event_types.is_empty()
-                || event_type.is_some_and(|t| self.event_types.iter().any(|want| want == t)))
+        offset >= self.start_offset && self.wants_type(event_type)
+    }
+
+    /// Whether its filter lets this event type through.
+    pub fn wants_type(&self, event_type: Option<&str>) -> bool {
+        self.event_types.is_empty()
+            || event_type.is_some_and(|t| self.event_types.iter().any(|want| want == t))
     }
 
     /// Requests it may have in flight at once.
