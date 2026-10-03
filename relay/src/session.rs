@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use crate::auth::{self, ADMIN, Refused};
+use crate::config::Oidc;
 use crate::tenant::Tenant;
 use crate::{App, unix_millis};
 
@@ -168,15 +169,31 @@ async fn endpoints(app: &App) -> Result<&Endpoints> {
     app.sessions
         .endpoints
         .get_or_try_init(|| async {
-            let url = format!("{}/.well-known/openid-configuration", oidc.issuer);
-            reqwest::get(&url)
+            let internal = |url: &str| internal(oidc, url);
+            let url = internal(&format!("{}/.well-known/openid-configuration", oidc.issuer));
+            let found = reqwest::get(&url)
                 .await?
                 .error_for_status()?
                 .json::<Endpoints>()
                 .await
-                .with_context(|| format!("read {url}"))
+                .with_context(|| format!("read {url}"))?;
+            // Browsers go to the authorization endpoint; this process calls
+            // the token endpoint.
+            Ok(Endpoints {
+                token_endpoint: internal(&found.token_endpoint),
+                ..found
+            })
         })
         .await
+}
+
+/// `url` at the address this process reaches the IdP at, which is the
+/// issuer's unless `RELAY_OIDC_INTERNAL_URL` says otherwise.
+fn internal(oidc: &Oidc, url: &str) -> String {
+    match (&oidc.internal_url, url.strip_prefix(&oidc.issuer)) {
+        (Some(base), Some(rest)) => format!("{base}{rest}"),
+        _ => url.to_string(),
+    }
 }
 
 fn redirect_uri(app: &App) -> String {
@@ -388,5 +405,23 @@ mod tests {
         assert_eq!(claims["exp"], 5);
         assert_eq!(display_name(&claims), "ana@example.com");
         assert!(super::claims("not-a-token").is_err());
+    }
+
+    #[test]
+    fn the_internal_url_replaces_the_issuer() {
+        let mut oidc = Oidc {
+            issuer: "http://127.0.0.1:5556/dex".to_string(),
+            client_id: "relay-admin".to_string(),
+            client_secret: "secret".to_string(),
+            internal_url: None,
+        };
+        let token = "http://127.0.0.1:5556/dex/token";
+        assert_eq!(internal(&oidc, token), token);
+        oidc.internal_url = Some("http://dex:5556/dex".to_string());
+        assert_eq!(internal(&oidc, token), "http://dex:5556/dex/token");
+        assert_eq!(
+            internal(&oidc, "https://elsewhere/token"),
+            "https://elsewhere/token"
+        );
     }
 }

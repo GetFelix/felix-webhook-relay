@@ -1,0 +1,85 @@
+# Dex for CI on kind, configured as in the compose install, and the
+# receiver from deploy/ci/receiver.py, which kind-install.sh puts in a
+# ConfigMap. Dex is reached through a port-forward
+# on 127.0.0.1:5556, which is its issuer.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex
+data:
+  config.yaml: |
+    issuer: http://127.0.0.1:5556/dex
+    storage:
+      type: memory
+    web:
+      http: 0.0.0.0:5556
+    oauth2:
+      skipApprovalScreen: true
+      passwordConnector: local
+    enablePasswordDB: true
+    staticClients:
+      - id: relay-admin
+        name: Felix Webhook Relay
+        secret: dev-admin-secret
+        redirectURIs: [http://127.0.0.1:8090/auth/callback]
+    staticPasswords:
+      - email: alice@example.com
+        username: alice
+        userID: "1"
+        hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+spec:
+  selector:
+    matchLabels: {app: dex}
+  template:
+    metadata:
+      labels: {app: dex}
+    spec:
+      containers:
+        - name: dex
+          image: ghcr.io/dexidp/dex:v2.44.0
+          command: ["dex", "serve", "/etc/dex/config.yaml"]
+          ports: [{containerPort: 5556}]
+          volumeMounts: [{name: config, mountPath: /etc/dex}]
+      volumes: [{name: config, configMap: {name: dex}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+spec:
+  selector: {app: dex}
+  ports: [{port: 5556}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: receiver
+spec:
+  selector:
+    matchLabels: {app: receiver}
+  template:
+    metadata:
+      labels: {app: receiver}
+    spec:
+      containers:
+        - name: receiver
+          image: python:3.13-alpine
+          command: ["python3", "-u", "/receiver/receiver.py"]
+          volumeMounts: [{name: receiver, mountPath: /receiver}]
+          ports: [{containerPort: 9000}]
+          readinessProbe:
+            tcpSocket: {port: 9000}
+      volumes: [{name: receiver, configMap: {name: receiver}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: receiver
+spec:
+  selector: {app: receiver}
+  ports: [{port: 9000}]

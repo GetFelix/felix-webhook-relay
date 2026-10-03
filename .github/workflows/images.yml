@@ -1,0 +1,312 @@
+name: Images
+
+# Every pull request builds the image for both platforms, runs the compose
+# install from it, and installs the Helm chart on kind. A v* tag also pushes
+# the image to GHCR, signs it, and runs the install again from what was
+# published. None of these jobs are required checks.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/felix-webhook-relay
+  PUSH: ${{ github.ref_type == 'tag' }}
+  # The Felix release the install and the chart are tested against.
+  FELIX_VERSION: v0.6.0-preview
+
+jobs:
+  # Each platform builds on a runner of its own architecture and, on a tag, is
+  # pushed by digest alone; `manifest` then tags one list over both and signs
+  # it. This is how Felix publishes its images.
+  build:
+    name: Image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag matches the versions the install pins
+        if: env.PUSH == 'true'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -q "felix-webhook-relay:\${RELAY_VERSION:-${version}}" deploy/compose/docker-compose.yml || {
+            echo "::error::deploy/compose/docker-compose.yml does not default RELAY_VERSION to ${version}"
+            exit 1
+          }
+          grep -qx "appVersion: \"${version}\"" deploy/helm/felix-webhook-relay/Chart.yaml || {
+            echo "::error::deploy/helm/felix-webhook-relay/Chart.yaml does not set appVersion to ${version}"
+            exit 1
+          }
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+
+      - name: Build${{ env.PUSH == 'true' && ' and push by digest' || '' }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Untagged on a tag: a tag here would point at one platform until
+          # the manifest job moved it. Otherwise saved for the install tests.
+          outputs: >-
+            ${{ env.PUSH == 'true'
+              && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE)
+              || format('type=docker,name={0}:ci,dest={1}/image.tar', env.IMAGE, runner.temp) }}
+          # Provenance and SBOM travel with a published image. A tarball for
+          # `docker load` cannot carry them.
+          provenance: ${{ env.PUSH == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUSH == 'true' }}
+          cache-from: type=gha,scope=relay-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=relay-${{ matrix.arch }}
+
+      - name: Record the digest
+        if: env.PUSH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        if: env.PUSH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload the image
+        if: env.PUSH != 'true' && matrix.arch == 'amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: ${{ runner.temp }}/image.tar
+          retention-days: 1
+
+  manifest:
+    name: Publish
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      # Keyless signing: cosign gets a short-lived certificate for this
+      # workflow's OIDC identity, so there is no key to store.
+      id-token: write
+    steps:
+      - name: Download the platform digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest` only for a version without a pre-release suffix.
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Create the manifest list
+        id: merge
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          count=$(ls | wc -l)
+          if [ "$count" -ne 2 ]; then
+            echo "::error::expected 2 platform digests, found ${count}"
+            exit 1
+          fi
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+          tag=$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      # By digest, never by tag: a tag can be moved and the signature would follow it.
+      - name: Sign
+        env:
+          DIGEST: ${{ steps.merge.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: What was published
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.merge.outputs.digest }}
+        run: |
+          printf '```\n%s\ndigest: %s\n```\n' "$TAGS" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+  # The release compose file, started the way the self-hosting guide starts
+  # it, from the image this run built or on a tag the one it published, and a
+  # webhook sent through it to an endpoint that goes down and comes back.
+  install:
+    name: Compose install
+    needs: [build, manifest]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.manifest.result != 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: deploy/compose
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load the image this run built
+        if: github.ref_type != 'tag'
+        uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: ${{ runner.temp }}/image
+
+      - name: Choose the image
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "RELAY_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            docker load -i "$RUNNER_TEMP/image/image.tar"
+            echo "RELAY_VERSION=ci" >> "$GITHUB_ENV"
+          fi
+
+      - name: Start the install
+        run: RELAY_SECRET_KEY="$(openssl rand -base64 32)" docker compose up -d --wait --wait-timeout 300
+
+      - name: A receiver on the install's network
+        run: |
+          docker run -d --name receiver --network felix-webhook-relay_default \
+            -v "$PWD/../ci/receiver.py:/receiver.py:ro" python:3.13-alpine python3 -u /receiver.py
+
+      - name: A webhook in and out, through an outage
+        env:
+          RECEIVER_URL: http://receiver:9000/hook
+          RECEIVER_STOP: docker stop receiver
+          RECEIVER_START: docker start receiver
+        run: ../ci/smoke.sh
+
+      - name: What the receiver got
+        if: always()
+        run: docker logs receiver
+
+      - name: Logs
+        if: failure()
+        run: docker compose logs
+
+  # The Helm chart on kind next to the Felix chart, from the image this run
+  # built, a webhook through it, then an upgrade and another webhook.
+  chart:
+    name: Helm chart on kind
+    needs: build
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The Felix chart
+        uses: actions/checkout@v4
+        with:
+          repository: gabloe/felix
+          ref: ${{ env.FELIX_VERSION }}
+          path: felix
+          sparse-checkout: deploy/helm/felix
+
+      - uses: azure/setup-helm@v4
+
+      - name: Lint
+        run: helm lint deploy/helm/felix-webhook-relay -f deploy/helm/felix-webhook-relay/ci/kind-values.yaml
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: kind
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: ${{ runner.temp }}/image
+
+      - name: Load the image
+        run: |
+          docker load -i "$RUNNER_TEMP/image/image.tar"
+          kind load docker-image "${IMAGE}:ci"
+
+      - name: Install Felix and the chart
+        env:
+          FELIX_CHART: ${{ github.workspace }}/felix/deploy/helm/felix
+        run: deploy/helm/felix-webhook-relay/ci/kind-install.sh
+
+      - name: A webhook in and out, through an outage
+        env:
+          RECEIVER_STOP: kubectl scale deployment/receiver --replicas=0
+          RECEIVER_START: kubectl scale deployment/receiver --replicas=1
+        run: deploy/helm/felix-webhook-relay/ci/smoke.sh
+
+      - name: Upgrade to three delivery workers, and another webhook
+        run: |
+          helm upgrade felix-webhook-relay deploy/helm/felix-webhook-relay \
+            -f deploy/helm/felix-webhook-relay/ci/kind-values.yaml --set deliver.replicas=3 --wait --timeout 5m
+          kubectl rollout status statefulset/felix-webhook-relay-deliver --timeout 5m
+          deploy/helm/felix-webhook-relay/ci/smoke.sh
+
+      - name: Cluster state
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          kubectl describe pods | tail -100
+          kubectl logs -l app.kubernetes.io/instance=felix-webhook-relay --all-containers --tail 100
+          kubectl logs felix-broker-0 --tail 100

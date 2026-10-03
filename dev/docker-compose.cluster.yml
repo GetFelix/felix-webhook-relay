@@ -26,7 +26,7 @@ services:
 
   seed:
     environment:
-      REPLICAS: "3"
+      RELAY_STREAM_REPLICAS: "3"
 
   broker:
     environment: &cluster

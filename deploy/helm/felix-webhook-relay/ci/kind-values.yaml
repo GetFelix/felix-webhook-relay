@@ -1,0 +1,28 @@
+# This chart as CI runs it on kind, next to felix-values.yaml, with Dex from
+# dex.yaml for admins, reached through port-forwards on 127.0.0.1.
+felix:
+  controlPlaneUrl: http://felix-controlplane:8443
+  brokers: [felix-broker:5000]
+  serverName: felix-broker
+  caSecret:
+    name: felix-broker-tls
+    key: tls.crt
+tokens:
+  bootstrapUrl: http://felix-controlplane-bootstrap:9095
+  bootstrapSecret:
+    name: felix-bootstrap
+secretKey:
+  existingSecret: felix-webhook-relay
+tenants: acme
+tenantAdmins: acme=alice@example.com
+oidc:
+  issuer: http://127.0.0.1:5556/dex
+  internalUrl: http://dex:5556/dex
+  jwksUrl: http://dex:5556/dex/keys
+  clientSecret:
+    existingSecret: felix-webhook-relay
+admin:
+  publicUrl: http://127.0.0.1:8090
+image:
+  tag: ci
+  pullPolicy: Never

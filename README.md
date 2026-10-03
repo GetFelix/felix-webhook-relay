@@ -14,7 +14,7 @@ durably before answering. It delivers each one to its endpoints, signed, with
 retries and backoff. It sets aside what an endpoint keeps refusing, and it can
 replay any endpoint over a time range after an outage.
 
-**Status: M6 done.** Sources and endpoints live in Felix, written through
+**Status: M7 done.** Sources and endpoints live in Felix, written through
 the admin API with their secrets sealed. Intake verifies Standard Webhooks,
 GitHub, Stripe and generic HMAC signatures before anything is stored, and
 dedupes retries on the sender's event id. Deliveries are signed with
@@ -32,7 +32,8 @@ its own Felix namespace by narrowed tokens, and admins sign in to a plain
 HTML page or use the JSON API. Killing intake, a worker, or any broker of a
 three-broker cluster under load loses nothing that was acknowledged, and the
 measured performance is in [docs/performance.md](docs/performance.md).
-Packaging for self-hosting is still to come.
+It ships as one signed multi-arch image with a compose install and a Helm
+chart.
 The design and the plan are in [docs/design.md](docs/design.md).
 
 ## Why it exists
@@ -71,6 +72,14 @@ One binary, `felix-relay`, runs as intake, delivery, admin, or all three.
 Each relay tenant is a Felix namespace, and every connection the relay opens
 for a tenant carries a token narrowed to it, so the broker refuses cross-tenant
 access on its own.
+
+## Self-hosting
+
+`deploy/compose/` runs the relay with Felix and nothing else, and
+`deploy/helm/felix-webhook-relay/` runs it on Kubernetes next to the Felix
+chart. [docs/self-hosting.md](docs/self-hosting.md) covers both, every
+setting, signing admins in with your own identity provider, and the broker
+settings the relay depends on.
 
 ## Running locally
 
@@ -227,7 +236,7 @@ cache under `health/<endpoint>`.
 | 4 | Replay and redrive | Any endpoint replays a time range from the log | Done |
 | 5 | Tenants, narrowed tokens, the admin page | Tenant isolation enforced by the broker | Done |
 | 6 | Crash and failover tests, performance targets | Nothing acknowledged is lost | Done |
-| 7 | Images, compose, Helm, a self-hosting guide | Anyone can self-host it | |
+| 7 | Images, compose, Helm, a self-hosting guide | Anyone can self-host it | Done |
 
 Each milestone is a [GitHub milestone](https://github.com/gabloe/felix-webhook-relay/milestones)
 with an issue per piece of work.

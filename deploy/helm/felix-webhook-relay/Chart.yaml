@@ -1,0 +1,15 @@
+apiVersion: v2
+name: felix-webhook-relay
+description: >-
+  Felix Webhook Relay on Kubernetes, next to a Felix release: intake as a
+  Deployment, delivery as a StatefulSet whose ordinal is the worker index,
+  admin behind an ingress, and the tokens service that seeds Felix.
+type: application
+version: 0.1.0
+# The relay release the defaults were written against. The image tag defaults to it.
+appVersion: "0.1.0"
+# StatefulSet pods carry their ordinal as a label from 1.28.
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/gabloe/felix-webhook-relay
+sources:
+  - https://github.com/gabloe/felix-webhook-relay

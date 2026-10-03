@@ -1,7 +1,8 @@
 # Felix for local development and CI: a control plane, one broker, Dex for
 # admins to sign in with, a stand-in IdP for the relay's own token, and a
-# one-shot seed that creates the relay tenants' namespaces, streams, caches
-# and roles. `dev/up.sh` starts it and waits for the broker and Dex.
+# one-shot run of deploy/seed.sh that creates the relay tenants' namespaces,
+# streams, caches and roles. `dev/up.sh` starts it and waits for the broker
+# and Dex.
 name: felix-webhook-relay
 
 services:
@@ -45,12 +46,25 @@ services:
   seed:
     image: alpine:3.22
     command: ["sh", "-c", "apk add --no-cache --quiet curl jq openssl && sh /app/seed.sh"]
+    environment:
+      TOKENS_ISSUER: http://idp:9400
+      RELAY_TENANTS: acme,globex
+      # Alice administers acme, bob globex, and carol nothing.
+      RELAY_TENANT_ADMINS: acme=alice@example.com globex=bob@example.com
+      RELAY_OIDC_ISSUER: http://127.0.0.1:5556/dex
+      RELAY_OIDC_JWKS_URL: http://dex:5556/dex/keys
+      BROKER_CERT_SAN: DNS:localhost,IP:127.0.0.1
+      # The relay runs on the host and reads this token for a dev session.
+      RELAY_TOKEN_LIFETIME_SECONDS: "2592000"
+      SEED_TEST_TOKENS: "1"
     volumes:
-      - ./seed.sh:/app/seed.sh:ro
+      - ../deploy/seed.sh:/app/seed.sh:ro
       - ./state:/state
     depends_on:
       controlplane:
         condition: service_healthy
+      dex:
+        condition: service_started
 
   broker:
     image: ghcr.io/gabloe/felix-broker:0.6.0-preview
