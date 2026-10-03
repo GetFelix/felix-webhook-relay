@@ -594,7 +594,10 @@ relay reads its claims without checking the signature, because the token came
 straight from the IdP's token endpoint and the control plane checks it on
 every exchange anyway. Each request exchanges the admin's token narrowed to
 the tenant they opened, and the Felix connection made with it is kept in
-memory until the ID token expires, so a page load does not cost a handshake.
+memory for five minutes, so a page load does not cost a handshake, then
+exchanged again, so a revoked role ends access within minutes. The claims
+only name the admin on the page; which tenant a request acts on comes from
+its path, and whether it may is the exchange's answer.
 Scripts send an ID token as a bearer token instead of the cookie. Who may
 administer a tenant is a Felix RBAC role, `role:relay-tenant-<tenant>`,
 granting the namespace's streams and caches plus `stream.manage`,
