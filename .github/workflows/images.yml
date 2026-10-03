@@ -34,8 +34,9 @@ concurrency:
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/felix-webhook-relay
   PUSH: ${{ inputs.push == true }}
-  # The Felix release the install and the chart are tested against.
-  FELIX_VERSION: v0.6.0-preview
+  # The Felix release the chart is tested against. Not FELIX_VERSION, which
+  # the compose file reads.
+  FELIX_CHART_REF: v0.6.0-preview
 
 jobs:
   # Each platform builds on a runner of its own architecture and, on a tag, is
@@ -230,7 +231,10 @@ jobs:
           fi
 
       - name: Start the install
-        run: RELAY_SECRET_KEY="$(openssl rand -base64 32)" docker compose up -d --wait --wait-timeout 300
+        run: |
+          key=$(openssl rand -base64 32)
+          echo "RELAY_SECRET_KEY=${key}" >> "$GITHUB_ENV"
+          RELAY_SECRET_KEY="$key" docker compose up -d --wait --wait-timeout 300
 
       - name: A receiver on the install's network
         run: |
@@ -269,7 +273,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: gabloe/felix
-          ref: ${{ env.FELIX_VERSION }}
+          ref: ${{ env.FELIX_CHART_REF }}
           path: felix
           sparse-checkout: deploy/helm/felix
 
