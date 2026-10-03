@@ -128,6 +128,7 @@ they cost the disk they were already using.
 - **Retention is one dial per broker.** Felix applies `FELIX_DURABLE_RETENTION_SECONDS` to every stream it holds. How long an endpoint may stay down without losing events, and how far back a replay reaches, are both that one number.
 - **Backoff is per endpoint, not per event.** An ordered endpoint with a failing head record waits as a whole. That is what ordering means, but it is a different model from per-message schedules, and the docs have to say so.
 - **One source is one shard is one owning broker.** A single source's intake rate is bounded by one broker. Sources spread across a cluster; one source does not.
+- **A stream per source costs a segment of disk.** A durable Felix stream preallocates its open segment, 256 MiB by default, so a few dozen sources reserve gigabytes before any webhook arrives. `FELIX_DURABLE_PREALLOCATE=false` or a smaller `FELIX_DURABLE_SEGMENT_BYTES` trades that away, broker-wide; the dev stack turns preallocation off.
 - **A broker is still a cluster to run.** Svix self-hosted is Postgres and Redis, which every operator already knows. Felix is a broker and a control plane they probably do not.
 
 ## Architecture
@@ -313,11 +314,21 @@ is not an error").
 Ordered is the default because it is the property the usual stack cannot give
 cheaply and the one most receivers quietly assume. An endpoint that does not
 care sets `unordered` and gets a window of concurrent requests. Both modes
-follow the polling rule above.
+follow the polling rule above, so an unordered endpoint works in rounds: it
+polls a window, sends it all at once, settles what it can, and sends the rest
+again after the longest wait any of them asked for, polling only once the
+whole window is settled. An ordered endpoint is the same loop with a window of
+one record, which keeps a single delivery path for both.
 
 **Endpoints are assigned statically.** Each delivery process is started with
 `RELAY_WORKER_INDEX` and `RELAY_WORKER_COUNT`, and owns the endpoints whose id
-hashes to its index, like a StatefulSet ordinal. A dynamic assignment needs a
+hashes to its index (FNV-1a, so every process agrees), like a StatefulSet
+ordinal. `RELAY_ENDPOINT_PREFIXES` narrows a process to ids with given
+prefixes, which lets a deployment give a group of endpoints delivery processes
+of their own. The process watches config and starts a task per owned endpoint,
+stops it when the endpoint is deleted, and restarts it when its source, mode
+or window changes; everything else, the URL, secrets, filters and the
+disabled flag, a task reads afresh before each request. A dynamic assignment needs a
 lease, and a lease needs a conditional write Felix does not have. Two
 processes started with the same index would both poll one group: no record is
 lost, but ordering for those endpoints is gone and repeats rise. The admin
@@ -384,7 +395,9 @@ An operator can press "retry now" on the admin page to skip the wait.
 An unordered endpoint can tell the two cases apart more often: if other records
 in its window succeed while one keeps failing with `5xx`, that record is
 treated as refused and dead-lettered after its three tries, rather than
-pausing everyone. An ordered endpoint has only one record in flight and cannot
+pausing everyone. Once it has been counted as refused it keeps counting that
+way when it is the only one left in hand, since it no longer has neighbours to
+compare with. An ordered endpoint has only one record in flight and cannot
 tell; it pauses.
 
 **Disable after three days.** An endpoint that has failed continuously for
@@ -729,6 +742,7 @@ real brokers.
 | No offset-for-time on the native API, and consumers never see the append timestamp | `received_at` in the envelope and a binary search over the log | Not filed |
 | No conditional cache put | Idempotency check races; static endpoint assignment; last-writer-wins config | Not filed |
 | Retention is broker-wide only | Document it and warn | Not filed |
+| Segment size and preallocation are broker-wide, so each stream reserves a full segment | Document the disk cost per source; dev stack turns preallocation off | Not filed |
 | Streams and caches created only through the control plane | The admin role calls the REST API | By design |
 | Offsets on acks need a broker-wide setting | Idempotent producer returns them | [felix#956](https://github.com/gabloe/felix/issues/956) |
 

@@ -117,7 +117,7 @@ async fn metrics(relay: &Relay) -> String {
 async fn one_process_delivers_in_order() {
     let run = unique("one");
     let endpoint = Endpoint::start().await;
-    let relay = Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT", &run)]).await;
+    let relay = Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT_PREFIXES", &run)]).await;
     let path = token_source(&relay, &run).await;
     relay.create_endpoint(&run, &run, &endpoint.url()).await;
 
@@ -154,7 +154,7 @@ async fn split_intake_and_delivery_deliver_in_order() {
     let path = token_source(&admin, &run).await;
     admin.create_endpoint(&run, &run, &endpoint.url()).await;
     let intake = Relay::start("intake", &[]).await;
-    let deliver = Relay::start("deliver", &[("RELAY_ENDPOINT", &run)]).await;
+    let deliver = Relay::start("deliver", &[("RELAY_ENDPOINT_PREFIXES", &run)]).await;
 
     let accepted = send_webhooks(&intake, &path, &run).await;
     assert_delivered_in_order(&endpoint, &accepted).await;

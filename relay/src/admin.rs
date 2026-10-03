@@ -9,8 +9,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
 use felix_relay_core::catalog::{
-    Endpoint, EventIdFrom, PreviousSecret, ROTATION_OVERLAP_MS, Source, endpoint_key, source_key,
-    valid_id,
+    DEFAULT_WINDOW, Endpoint, EventIdFrom, Mode, PreviousSecret, ROTATION_OVERLAP_MS, Source,
+    endpoint_key, source_key, valid_id,
 };
 use felix_relay_core::secret::random_bytes;
 use felix_relay_core::signature::{Scheme, new_standard_secret};
@@ -189,6 +189,15 @@ struct EndpointInput {
     url: String,
     /// Kept from the existing endpoint when absent, or made up for a new one.
     secret: Option<String>,
+    #[serde(default)]
+    mode: Mode,
+    window: Option<u32>,
+    #[serde(default)]
+    event_types: Vec<String>,
+    /// For a new endpoint: start from the beginning of the source's log
+    /// rather than from its tail.
+    #[serde(default)]
+    backfill: bool,
 }
 
 async fn put_endpoint(
@@ -206,6 +215,11 @@ async fn put_endpoint(
     }
     let existing: Option<Endpoint> = read(&app, &key).await?;
     let disabled = existing.as_ref().and_then(|e| e.disabled.clone());
+    let start_offset = match &existing {
+        Some(existing) if existing.source == input.source => existing.start_offset,
+        _ if input.backfill => 0,
+        _ => source_tail(&app, &input.source).await?,
+    };
     let mut generated = None;
     let (secret, previous_secret) = match (input.secret, existing) {
         (Some(secret), existing) => {
@@ -228,6 +242,10 @@ async fn put_endpoint(
         url: input.url,
         secret,
         previous_secret,
+        mode: input.mode,
+        window: input.window.unwrap_or(DEFAULT_WINDOW).clamp(1, 256),
+        event_types: input.event_types,
+        start_offset,
         disabled,
     };
     write(&app, &key, &endpoint).await?;
@@ -236,6 +254,29 @@ async fn put_endpoint(
         shown["secret"] = json!(secret);
     }
     Ok(Json(shown).into_response())
+}
+
+/// The offset the next webhook to the source will get. A new endpoint starts
+/// there, because a new Felix group starts at the beginning of the log and
+/// cannot be told otherwise.
+async fn source_tail(app: &App, source: &str) -> Result<u64, ApiError> {
+    let felix = &app.felix;
+    let subscription = felix
+        .client()
+        .subscribe_from(
+            &felix.tenant,
+            &felix.namespace,
+            &format!("src.{source}"),
+            Some(felix_client::StartPosition::Latest),
+        )
+        .await
+        .map_err(|err| bad_request(format!("source {source} has no stream: {err:#}")))?;
+    subscription.live_offset().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no tail offset".to_string(),
+        )
+    })
 }
 
 async fn get_endpoint(

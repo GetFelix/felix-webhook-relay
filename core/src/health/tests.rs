@@ -209,6 +209,59 @@ fn durations_parse() {
     assert_eq!(parse_durations("5s,,1m"), None);
 }
 
+#[test]
+fn in_a_window_a_record_failing_while_others_succeed_is_refused() {
+    let policy = Policy::default();
+    let mut health = Health::default();
+    let unwell = Outcome::Unwell { retry_after: None };
+    let mut refusals = [0, 0];
+    let round = [Outcome::Delivered, unwell];
+    let decisions = health.decide_window(&round, &mut refusals, 0, 0.0, &policy);
+    assert_eq!(decisions, [Decision::Ack, Decision::Retry(secs(5))]);
+    assert_eq!(health.state, State::Active, "the endpoint does not pause");
+
+    // Left alone in hand, it is still the record that is the problem.
+    let mut left = [refusals[1]];
+    for then in [Decision::Retry(secs(30)), Decision::DeadLetter] {
+        let decisions = health.decide_window(&[unwell], &mut left, 0, 0.0, &policy);
+        assert_eq!(decisions, [then]);
+        assert_eq!(health.state, State::Active);
+    }
+}
+
+#[test]
+fn a_window_where_nothing_gets_through_pauses_once() {
+    let policy = Policy::default();
+    let mut health = Health::default();
+    let unwell = Outcome::Unwell { retry_after: None };
+    let mut refusals = [0; 16];
+    let decisions = health.decide_window(&[unwell; 16], &mut refusals, 0, 0.0, &policy);
+    assert!(decisions.iter().all(|d| *d == Decision::Pause(secs(5))));
+    assert_eq!(health.state, State::Paused);
+    let decisions = health.decide_window(&[unwell; 16], &mut refusals, 0, 0.0, &policy);
+    assert!(
+        decisions.iter().all(|d| *d == Decision::Pause(secs(15))),
+        "the schedule moves one step per round"
+    );
+    assert_eq!(refusals, [0; 16]);
+}
+
+#[test]
+fn a_window_with_a_refusal_and_an_outage_still_pauses() {
+    let policy = Policy::default();
+    let mut health = Health::default();
+    let unwell = Outcome::Unwell { retry_after: None };
+    let decisions = health.decide_window(
+        &[Outcome::Refused, unwell, Outcome::Gone],
+        &mut [0, 0, 0],
+        0,
+        0.0,
+        &policy,
+    );
+    assert_eq!(decisions[0], Decision::Retry(secs(5)));
+    assert!(matches!(decisions[2], Decision::Disable(_)));
+}
+
 /// A consumer group as Felix keeps it, reduced to what ordering depends on:
 /// claims lapse after the visibility timeout and become owed, owed records
 /// are handed out before new ones, lowest first, and an acknowledgement

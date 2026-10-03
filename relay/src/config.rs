@@ -62,8 +62,14 @@ pub(crate) struct Config {
     /// `RELAY_SECRET_KEY`: 32 bytes, base64 or hex, that seal every secret
     /// the relay stores in Felix. Required.
     pub(crate) secret_key: SecretKey,
-    /// `RELAY_ENDPOINT`: the endpoint this process delivers to. Default `demo`.
-    pub(crate) endpoint: String,
+    /// `RELAY_WORKER_INDEX` and `RELAY_WORKER_COUNT`: this delivery process
+    /// owns the endpoints whose id hashes to its index. Default 0 of 1.
+    pub(crate) worker_index: u32,
+    pub(crate) worker_count: u32,
+    /// `RELAY_ENDPOINT_PREFIXES`: comma-separated; when set, this process
+    /// only considers endpoints whose ids start with one of them, so a
+    /// deployment can give a group of endpoints its own delivery processes.
+    pub(crate) endpoint_prefixes: Vec<String>,
     /// `RELAY_CLAIM_WAIT_MS`: how long a delivery task waits before its first
     /// poll. Must be at least the broker's `FELIX_GROUP_VISIBILITY_TIMEOUT_MS`.
     /// Default 30,000, the broker's default.
@@ -98,6 +104,15 @@ impl Config {
                 None => defaults.disable_after,
             },
         };
+        let worker_count: u32 = or("RELAY_WORKER_COUNT", "1")
+            .parse()
+            .context("parse RELAY_WORKER_COUNT")?;
+        let worker_index: u32 = or("RELAY_WORKER_INDEX", "0")
+            .parse()
+            .context("parse RELAY_WORKER_INDEX")?;
+        if worker_count == 0 || worker_index >= worker_count {
+            bail!("RELAY_WORKER_INDEX must be below RELAY_WORKER_COUNT, which must be at least 1");
+        }
         let secret_key = var("RELAY_SECRET_KEY").context(
             "RELAY_SECRET_KEY is required: 32 random bytes, base64 or hex, e.g. `openssl rand -base64 32`",
         )?;
@@ -130,7 +145,14 @@ impl Config {
             felix_tenant: or("RELAY_FELIX_TENANT", "relay"),
             tenant: or("RELAY_TENANT", "acme"),
             secret_key: SecretKey::parse(&secret_key)?,
-            endpoint: or("RELAY_ENDPOINT", "demo"),
+            worker_index,
+            worker_count,
+            endpoint_prefixes: or("RELAY_ENDPOINT_PREFIXES", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|prefix| !prefix.is_empty())
+                .map(str::to_string)
+                .collect(),
             claim_wait: Duration::from_millis(
                 or("RELAY_CLAIM_WAIT_MS", "30000")
                     .parse()
@@ -139,7 +161,7 @@ impl Config {
             policy,
             reporter: var("RELAY_WORKER_NAME").unwrap_or_else(|| {
                 let host = var("HOSTNAME").unwrap_or_else(|| "relay".to_string());
-                format!("{host}/{}", std::process::id())
+                format!("{host}/{} worker {worker_index}", std::process::id())
             }),
         })
     }
@@ -242,5 +264,19 @@ mod tests {
     fn the_token_file_is_required() {
         let err = config(&REQUIRED[1..]).unwrap_err();
         assert!(err.to_string().contains("RELAY_FELIX_TOKEN_FILE"));
+    }
+
+    #[test]
+    fn worker_index_is_below_the_count() {
+        let mut vars = REQUIRED.to_vec();
+        vars.push(("RELAY_WORKER_COUNT", "3"));
+        vars.push(("RELAY_WORKER_INDEX", "2"));
+        vars.push(("RELAY_ENDPOINT_PREFIXES", "team-a-, team-b-"));
+        let parsed = config(&vars).unwrap();
+        assert_eq!((parsed.worker_index, parsed.worker_count), (2, 3));
+        assert_eq!(parsed.endpoint_prefixes, ["team-a-", "team-b-"]);
+        let mut over = REQUIRED.to_vec();
+        over.extend([("RELAY_WORKER_COUNT", "3"), ("RELAY_WORKER_INDEX", "3")]);
+        assert!(config(&over).is_err());
     }
 }
