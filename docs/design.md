@@ -489,8 +489,9 @@ filters by `received_at`, so interleaving cannot drop an edge record. The end
 of a range is found the same way, aiming five seconds past it. Each read opens
 a subscription at the probe offset and takes the first record it gets, which
 also steps over offsets the broker never delivers. On the dev stack a read
-costs about 12 ms, so a million records resolve in about 250 ms (see the
-performance doc for the 10-million figure).
+costs about 12 ms, so a million records resolve in about 250 ms. On a
+GitHub-hosted runner, 10 million records resolve in 137 to 341 ms with 23 or
+24 reads.
 
 A replay job is a cache entry, `state/job/<id>`: the endpoint, the offset
 range, the next offset, and a status. The endpoint's worker runs it with a
