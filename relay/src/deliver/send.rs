@@ -68,6 +68,7 @@ impl Sender {
         let result = self.request(endpoint, id, envelope, job, at).await;
         let elapsed = started.elapsed();
         self.app.metrics.outbound.record(elapsed);
+        if std::env::var_os("RELAY_TIMINGS").is_some() { eprintln!("T ep={} send_us={}", self.endpoint, elapsed.as_micros()); }
         let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         match result {
             Ok(mut response) => {

@@ -85,7 +85,7 @@ jobs:
           RELAY_TEST_ISOLATION_WEBHOOKS: "1000"
         run: |
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-          cargo test --locked --test isolation -- --include-ignored --nocapture
+          RELAY_TIMINGS=1 cargo test --locked --test isolation -- --include-ignored --nocapture 2>&1 | tee iso.log | grep -v "^T " ; grep "^T " iso.log | python3 scripts-timings.py
       - name: Offset for a time, 10 million records
         env:
           RELAY_TEST_SEARCH_RECORDS: "10000000"

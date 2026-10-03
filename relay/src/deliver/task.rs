@@ -107,6 +107,7 @@ impl Task {
         };
         loop {
             self.wait_for_jobs_that_pause_live().await?;
+            let poll_started = std::time::Instant::now();
             let polled = self
                 .felix()
                 .group_poll_wait(
@@ -132,6 +133,7 @@ impl Task {
                 }
             };
             let polled_at = unix_millis();
+            let poll_us = poll_started.elapsed().as_micros();
             let mut wanted = Vec::new();
             let mut skipped = Vec::new();
             for record in records {
@@ -145,8 +147,14 @@ impl Task {
             join_all(skipped.into_iter().map(|offset| self.ack(offset))).await;
             match self.mode {
                 Mode::Ordered => {
+                    let n = wanted.len();
                     for held in wanted {
+                        let received_at = held.envelope.received_at;
+                        let settle_started = std::time::Instant::now();
                         self.settle(vec![held]).await?;
+                        if std::env::var_os("RELAY_TIMINGS").is_some() {
+                            eprintln!("T ep={} batch={n} poll_us={poll_us} wake_ms={} settle_us={} total_ms={}", self.endpoint, polled_at.saturating_sub(received_at), settle_started.elapsed().as_micros(), unix_millis().saturating_sub(received_at));
+                        }
                     }
                 }
                 Mode::Unordered => self.settle(wanted).await?,
@@ -381,6 +389,7 @@ impl Task {
 
     async fn ack(&self, offset: u64) {
         let felix = &self.tenant.felix;
+        let ack_started = std::time::Instant::now();
         while let Err(err) = self
             .felix()
             .group_ack(
@@ -395,6 +404,9 @@ impl Task {
         {
             tracing::warn!(offset, "ack failed: {err:#}");
             tokio::time::sleep(FELIX_RETRY).await;
+        }
+        if std::env::var_os("RELAY_TIMINGS").is_some() {
+            eprintln!("T ep={} ack_us={}", self.endpoint, ack_started.elapsed().as_micros());
         }
         self.reporter.update(false, |report| {
             report.last_acked = report.last_acked.max(Some(offset))

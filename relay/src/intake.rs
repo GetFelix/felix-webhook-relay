@@ -141,6 +141,7 @@ async fn accept(
         }
     };
     app.metrics.intake_ack.record(started.elapsed());
+    if std::env::var_os("RELAY_TIMINGS").is_some() { eprintln!("T intake_append_us={}", started.elapsed().as_micros()); }
     felix.count(format!("received/{source_id}"));
     if let Some(key) = &idem_key
         && let Err(err) = felix
