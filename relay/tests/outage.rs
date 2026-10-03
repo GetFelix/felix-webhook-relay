@@ -95,7 +95,10 @@ async fn an_endpoint_that_was_down_gets_everything_in_order() {
     let relay = Arc::new(
         Relay::start(
             "intake,deliver,admin",
-            &[("RELAY_ENDPOINT", &run), ("RELAY_BACKOFF", &backoff)],
+            &[
+                ("RELAY_ENDPOINT_PREFIXES", &run),
+                ("RELAY_BACKOFF", &backoff),
+            ],
         )
         .await,
     );
@@ -179,7 +182,7 @@ async fn a_refused_record_is_dead_lettered_and_the_rest_arrive() {
         Relay::start(
             "intake,deliver,admin",
             &[
-                ("RELAY_ENDPOINT", &run),
+                ("RELAY_ENDPOINT_PREFIXES", &run),
                 ("RELAY_REFUSED_RETRIES", "100ms,200ms"),
             ],
         )
@@ -226,7 +229,7 @@ async fn a_restarted_worker_resumes_in_order() {
 
     // The claim wait must cover the dev broker's 5 s visibility timeout.
     let worker = [
-        ("RELAY_ENDPOINT", run.as_str()),
+        ("RELAY_ENDPOINT_PREFIXES", run.as_str()),
         ("RELAY_CLAIM_WAIT_MS", "5000"),
     ];
     let first = Relay::start("deliver", &worker).await;
@@ -265,7 +268,8 @@ async fn gone_disables_the_endpoint_until_it_is_enabled() {
         _ => StatusCode::NO_CONTENT,
     })
     .await;
-    let relay = Arc::new(Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT", &run)]).await);
+    let relay =
+        Arc::new(Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT_PREFIXES", &run)]).await);
     let path = setup(&relay, &run, &endpoint.url()).await;
     let bodies = (0..3).map(|n| format!("{{\"n\":{n}}}")).collect();
     let accepted = send_all(&relay, &path, bodies).await;

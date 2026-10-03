@@ -180,7 +180,7 @@ async fn every_scheme_refuses_bad_and_stale_signatures_before_the_log() {
 async fn deliveries_verify_with_the_standard_webhooks_library() {
     let run = unique("signed");
     let endpoint = Endpoint::start().await;
-    let relay = Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT", &run)]).await;
+    let relay = Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT_PREFIXES", &run)]).await;
     let token = relay
         .create_source(&run, json!({ "scheme": { "type": "token" } }))
         .await
@@ -258,7 +258,7 @@ async fn a_redelivered_record_keeps_its_first_id() {
         _ => StatusCode::NO_CONTENT,
     })
     .await;
-    let relay = Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT", &run)]).await;
+    let relay = Relay::start("intake,deliver,admin", &[("RELAY_ENDPOINT_PREFIXES", &run)]).await;
     let secret = "gh secret";
     relay
         .create_source(
