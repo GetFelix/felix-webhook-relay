@@ -1,6 +1,9 @@
 //! Delivery: one task per endpoint this process owns, started, restarted and
-//! stopped as the endpoints in config change.
+//! stopped as the endpoints in config change, and the replay and redrive
+//! jobs for those endpoints.
 
+mod job;
+mod send;
 mod task;
 
 use std::collections::HashMap;
@@ -12,6 +15,8 @@ use felix_relay_core::catalog::{Endpoint, owner};
 use tokio::task::JoinHandle;
 
 use crate::App;
+pub(crate) use job::read_dead_letter;
+use send::Sender;
 use task::Task;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -25,17 +30,20 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
         .build()?;
     let config = &app.config;
     let mut catalog = app.catalog.clone();
+    let mut jobs = app.jobs.clone();
     let mut running: HashMap<String, (Endpoint, JoinHandle<()>)> = HashMap::new();
+    let mut running_jobs: HashMap<String, JoinHandle<()>> = HashMap::new();
+    let owns = |id: &str| {
+        (config.endpoint_prefixes.is_empty()
+            || config.endpoint_prefixes.iter().any(|p| id.starts_with(p)))
+            && owner(id, config.worker_count) == config.worker_index
+    };
     loop {
         let owned: HashMap<String, Endpoint> = catalog
             .borrow_and_update()
             .endpoints
             .iter()
-            .filter(|(id, _)| {
-                (config.endpoint_prefixes.is_empty()
-                    || config.endpoint_prefixes.iter().any(|p| id.starts_with(p)))
-                    && owner(id, config.worker_count) == config.worker_index
-            })
+            .filter(|(id, _)| owns(id))
             .map(|(id, endpoint)| (id.clone(), endpoint.clone()))
             .collect();
 
@@ -47,21 +55,40 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
             }
             keep
         });
-        for (id, endpoint) in owned {
-            if running.contains_key(&id) {
+        for (id, endpoint) in &owned {
+            if running.contains_key(id) {
                 continue;
             }
-            let task = Task::new(Arc::clone(&app), &id, &endpoint, http.clone());
+            let task = Task::new(Arc::clone(&app), id, endpoint, http.clone());
             let handle = tokio::spawn(async move {
                 if let Err(err) = task.run().await {
                     tracing::error!("a delivery task stopped: {err:#}");
                 }
             });
-            running.insert(id, (endpoint, handle));
+            running.insert(id.clone(), (endpoint.clone(), handle));
+        }
+
+        running_jobs.retain(|_, handle| !handle.is_finished());
+        for (id, job) in &jobs.borrow_and_update().0 {
+            let Some(endpoint) = owned.get(&job.endpoint) else {
+                continue;
+            };
+            if !job.active() || running_jobs.contains_key(id) {
+                continue;
+            }
+            let sender = Sender {
+                app: Arc::clone(&app),
+                endpoint: job.endpoint.clone(),
+                source: endpoint.source.clone(),
+                http: http.clone(),
+            };
+            let handle = tokio::spawn(job::run(sender, id.clone(), job.clone()));
+            running_jobs.insert(id.clone(), handle);
         }
 
         tokio::select! {
             changed = catalog.changed() => changed.context("the config watch stopped")?,
+            changed = jobs.changed() => changed.context("the job watch stopped")?,
             () = tokio::time::sleep(RESTART_EVERY) => {}
         }
     }

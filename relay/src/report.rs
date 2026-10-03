@@ -9,10 +9,10 @@ use felix_relay_core::health::State;
 use felix_relay_core::records::HealthReport;
 use tokio::sync::Notify;
 
+use crate::catalog::STATE;
 use crate::felix::Felix;
 use crate::unix_millis;
 
-pub(crate) const STATE: &str = "state";
 const EVERY: Duration = Duration::from_secs(3);
 /// Only the latest gaps are kept; an operator needs to see that they
 /// happen, not every one.

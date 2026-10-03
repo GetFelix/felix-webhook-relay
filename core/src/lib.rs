@@ -4,6 +4,7 @@
 pub mod catalog;
 mod envelope;
 pub mod health;
+pub mod jobs;
 pub mod records;
 pub mod secret;
 pub mod signature;

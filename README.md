@@ -14,7 +14,7 @@ durably before answering. It delivers each one to its endpoints, signed, with
 retries and backoff. It sets aside what an endpoint keeps refusing, and it can
 replay any endpoint over a time range after an outage.
 
-**Status: M3 done.** Sources and endpoints live in Felix, written through
+**Status: M4 done.** Sources and endpoints live in Felix, written through
 the admin API with their secrets sealed. Intake verifies Standard Webhooks,
 GitHub, Stripe and generic HMAC signatures before anything is stored, and
 dedupes retries on the sender's event id. Deliveries are signed with
@@ -25,8 +25,9 @@ tail unless it backfills. An
 endpoint that is down pauses and probes on a backoff schedule while its
 backlog waits in the log, a record it keeps refusing goes to the `dead`
 stream, and an endpoint that answers `410` or fails for three days is
-disabled until an operator enables it. Replay and the admin page are still
-to come.
+disabled until an operator enables it. Any endpoint can replay a time or
+offset range from the log beside live delivery, and dead letters can be
+redriven or discarded. Tenants and the admin page are still to come.
 The design and the plan are in [docs/design.md](docs/design.md).
 
 ## Why it exists
@@ -168,6 +169,18 @@ cargo test -- --include-ignored
 `relay_outbound_request_seconds`, and a counter of group polls,
 `relay_group_polls_total`, which stands still while an endpoint is paused.
 
+Replay an endpoint over a time range (Unix milliseconds), then follow the job:
+
+```bash
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"since": 1791030000000, "until": 1791030600000}' \
+  http://127.0.0.1:8090/api/acme/endpoints/demo/replays
+curl -s http://127.0.0.1:8090/api/acme/jobs/<id>
+```
+
+`GET /api/acme/dead` lists dead letters, and
+`POST /api/acme/dead/<offset>/redrive` or `.../discard` acts on one.
+
 A disabled endpoint is enabled again with
 `POST /api/<tenant>/endpoints/<id>/enable`, and its health is in the `state`
 cache under `health/<endpoint>`.
@@ -180,7 +193,7 @@ cache under `health/<endpoint>`.
 | 1 | Signatures in and out, idempotency keys | Senders are verified, deliveries verify with standard libraries | Done |
 | 2 | Retries, pausing, backoff, dead letters | An endpoint down for an hour gets everything back in order | Done |
 | 3 | Many sources and endpoints, ordered and unordered | One slow endpoint does not delay the others | Done |
-| 4 | Replay and redrive | Any endpoint replays a time range from the log | |
+| 4 | Replay and redrive | Any endpoint replays a time range from the log | Done |
 | 5 | Tenants, narrowed tokens, the admin page | Tenant isolation enforced by the broker | |
 | 6 | Crash and failover tests, performance targets | Nothing acknowledged is lost | |
 | 7 | Images, compose, Helm, a self-hosting guide | Anyone can self-host it | |

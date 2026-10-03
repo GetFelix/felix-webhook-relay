@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use felix_client::{ClientConfig, ClusterClient, IdempotentProducer};
+use felix_client::{ClientConfig, ClusterClient, IdempotentProducer, StartPosition};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -102,6 +102,61 @@ impl Felix {
             .await
             .with_context(|| format!("delete {cache}/{key}"))?;
         Ok(())
+    }
+
+    /// The oldest offset `stream` still holds, and the offset the next record
+    /// appended to it will get.
+    pub(crate) async fn bounds(&self, stream: &str) -> Result<(u64, u64)> {
+        let subscribe = |start| {
+            self.client
+                .subscribe_from(&self.tenant, &self.namespace, stream, Some(start))
+        };
+        let oldest = subscribe(StartPosition::Earliest).await?.start_offset();
+        let tail = subscribe(StartPosition::Latest)
+            .await?
+            .live_offset()
+            .with_context(|| format!("{stream} reported no tail"))?;
+        Ok((oldest.unwrap_or(0).min(tail), tail))
+    }
+
+    /// Up to `limit` records of `stream` in `[from, to)`, in order. The
+    /// broker skips some offsets, so fewer can come back than the range is wide.
+    pub(crate) async fn read(
+        &self,
+        stream: &str,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>> {
+        let mut records = Vec::new();
+        if from >= to {
+            return Ok(records);
+        }
+        let mut subscription = self
+            .client
+            .subscribe_from(
+                &self.tenant,
+                &self.namespace,
+                stream,
+                Some(StartPosition::Offset(from)),
+            )
+            .await?;
+        // The records are already in the log, so a pause this long means
+        // the rest of the range is offsets the broker skips.
+        while let Ok(event) =
+            tokio::time::timeout(Duration::from_secs(1), subscription.next_event()).await
+        {
+            let Some(event) = event? else { break };
+            let offset = event.offset.context("a record without an offset")?;
+            if offset >= to {
+                break;
+            }
+            records.push((offset, event.payload.to_vec()));
+            if offset + 1 >= to || records.len() >= limit {
+                break;
+            }
+        }
+        Ok(records)
     }
 
     /// Publish without waiting for the broker to store it, for records that
