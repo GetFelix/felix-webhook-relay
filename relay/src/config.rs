@@ -35,12 +35,17 @@ impl Roles {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct Oidc {
+    pub(crate) issuer: String,
+    pub(crate) client_id: String,
+    pub(crate) client_secret: String,
+}
+
 /// Relay settings. The defaults match the development stack in `dev/`.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    /// `RELAY_LISTEN`. Default `127.0.0.1:8090`. With the admin role it must
-    /// be a loopback address unless `RELAY_ADMIN_ALLOW_PUBLIC=true`, because
-    /// the admin API has no sign-in yet.
+    /// `RELAY_LISTEN`. Default `127.0.0.1:8090`.
     pub(crate) listen: SocketAddr,
     /// `RELAY_ROLES`: any of `intake`, `deliver`, `admin`, comma-separated.
     /// Default all three.
@@ -53,12 +58,24 @@ pub(crate) struct Config {
     /// `RELAY_FELIX_CA_FILE`: PEM certificates to trust for the broker. Unset
     /// means the platform trust store.
     pub(crate) ca_file: Option<PathBuf>,
-    /// `RELAY_FELIX_TOKEN_FILE`: the Felix token the relay connects with. Required.
-    pub(crate) token_file: PathBuf,
+    /// `RELAY_IDP_TOKEN_FILE`: an ID token from the deployment's IdP for the
+    /// relay's service principal. Read again whenever the relay needs a new
+    /// Felix token, so whatever keeps it fresh can just rewrite it. Required.
+    pub(crate) idp_token_file: PathBuf,
+    /// `RELAY_FELIX_CONTROL_PLANE`: where tokens are exchanged and streams
+    /// created. Default `http://127.0.0.1:8443`.
+    pub(crate) control_plane: String,
+    /// `RELAY_OIDC_ISSUER`, `RELAY_OIDC_CLIENT_ID`, `RELAY_OIDC_CLIENT_SECRET`:
+    /// how admins sign in. Required for the admin role.
+    pub(crate) oidc: Option<Oidc>,
+    /// `RELAY_PUBLIC_URL`: where browsers reach this process, for the sign-in
+    /// redirect. Default `http://<RELAY_LISTEN>`.
+    pub(crate) public_url: String,
     /// `RELAY_FELIX_TENANT`: the Felix tenant the deployment lives in. Default `relay`.
     pub(crate) felix_tenant: String,
-    /// `RELAY_TENANT`: the relay tenant, which is a Felix namespace. Default `acme`.
-    pub(crate) tenant: String,
+    /// `RELAY_TENANTS`: the relay tenants this process serves, comma-separated.
+    /// Each is a Felix namespace. Default `acme`.
+    pub(crate) tenants: Vec<String>,
     /// `RELAY_SECRET_KEY`: 32 bytes, base64 or hex, that seal every secret
     /// the relay stores in Felix. Required.
     pub(crate) secret_key: SecretKey,
@@ -121,14 +138,17 @@ impl Config {
             .context("parse RELAY_LISTEN")?;
         let roles = Roles::parse(&or("RELAY_ROLES", "intake,deliver,admin"))
             .context("parse RELAY_ROLES")?;
-        let allow_public = or("RELAY_ADMIN_ALLOW_PUBLIC", "false") == "true";
-        if roles.admin && !listen.ip().is_loopback() && !allow_public {
-            bail!(
-                "the admin API has no sign-in, so with the admin role RELAY_LISTEN must be a \
-                 loopback address; run admin in its own process, or set \
-                 RELAY_ADMIN_ALLOW_PUBLIC=true if something in front of it authenticates"
-            );
-        }
+        let oidc = match var("RELAY_OIDC_ISSUER") {
+            Some(issuer) => Some(Oidc {
+                issuer: issuer.trim_end_matches('/').to_string(),
+                client_id: var("RELAY_OIDC_CLIENT_ID")
+                    .context("RELAY_OIDC_CLIENT_ID is required")?,
+                client_secret: var("RELAY_OIDC_CLIENT_SECRET")
+                    .context("RELAY_OIDC_CLIENT_SECRET is required")?,
+            }),
+            None if roles.admin => bail!("the admin role needs RELAY_OIDC_ISSUER for sign-in"),
+            None => None,
+        };
         Ok(Self {
             listen,
             roles,
@@ -139,11 +159,23 @@ impl Config {
                 .context("parse RELAY_FELIX_BROKERS")?,
             server_name: or("RELAY_FELIX_SERVER_NAME", "localhost"),
             ca_file: var("RELAY_FELIX_CA_FILE").map(PathBuf::from),
-            token_file: var("RELAY_FELIX_TOKEN_FILE")
+            idp_token_file: var("RELAY_IDP_TOKEN_FILE")
                 .map(PathBuf::from)
-                .context("RELAY_FELIX_TOKEN_FILE is required")?,
+                .context("RELAY_IDP_TOKEN_FILE is required")?,
+            control_plane: or("RELAY_FELIX_CONTROL_PLANE", "http://127.0.0.1:8443")
+                .trim_end_matches('/')
+                .to_string(),
+            oidc,
+            public_url: var("RELAY_PUBLIC_URL")
+                .unwrap_or_else(|| format!("http://{listen}"))
+                .trim_end_matches('/')
+                .to_string(),
             felix_tenant: or("RELAY_FELIX_TENANT", "relay"),
-            tenant: or("RELAY_TENANT", "acme"),
+            tenants: or("RELAY_TENANTS", "acme")
+                .split(',')
+                .map(|tenant| tenant.trim().to_string())
+                .filter(|tenant| !tenant.is_empty())
+                .collect(),
             secret_key: SecretKey::parse(&secret_key)?,
             worker_index,
             worker_count,
@@ -179,12 +211,15 @@ mod tests {
         })
     }
 
-    const REQUIRED: [(&str, &str); 2] = [
-        ("RELAY_FELIX_TOKEN_FILE", "relay.token"),
+    const REQUIRED: [(&str, &str); 5] = [
+        ("RELAY_IDP_TOKEN_FILE", "relay-idp.token"),
         (
             "RELAY_SECRET_KEY",
             "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
         ),
+        ("RELAY_OIDC_ISSUER", "http://127.0.0.1:5556/dex/"),
+        ("RELAY_OIDC_CLIENT_ID", "relay-admin"),
+        ("RELAY_OIDC_CLIENT_SECRET", "dev-admin-secret"),
     ];
 
     #[test]
@@ -198,25 +233,19 @@ mod tests {
                 admin: true
             }
         );
-        assert_eq!(config.tenant, "acme");
+        assert_eq!(config.tenants, ["acme"]);
     }
 
     #[test]
-    fn the_admin_api_binds_to_loopback_by_default() {
-        let default = config(&REQUIRED).unwrap();
-        assert!(default.roles.admin && default.listen.ip().is_loopback());
-
-        let mut public = REQUIRED.to_vec();
-        public.push(("RELAY_LISTEN", "0.0.0.0:8090"));
-        let err = config(&public).unwrap_err();
-        assert!(err.to_string().contains("RELAY_ADMIN_ALLOW_PUBLIC"));
-
-        let mut intake_only = public.clone();
-        intake_only.push(("RELAY_ROLES", "intake,deliver"));
-        assert!(config(&intake_only).is_ok());
-
-        public.push(("RELAY_ADMIN_ALLOW_PUBLIC", "true"));
-        assert!(config(&public).is_ok());
+    fn the_admin_role_needs_sign_in_settings() {
+        let err = config(&REQUIRED[..2]).unwrap_err();
+        assert!(err.to_string().contains("RELAY_OIDC_ISSUER"));
+        let mut deliver_only = REQUIRED[..2].to_vec();
+        deliver_only.push(("RELAY_ROLES", "intake,deliver"));
+        assert!(config(&deliver_only).is_ok());
+        let parsed = config(&REQUIRED).unwrap();
+        assert_eq!(parsed.public_url, "http://127.0.0.1:8090");
+        assert_eq!(parsed.oidc.unwrap().issuer, "http://127.0.0.1:5556/dex");
     }
 
     #[test]
@@ -263,7 +292,7 @@ mod tests {
     #[test]
     fn the_token_file_is_required() {
         let err = config(&REQUIRED[1..]).unwrap_err();
-        assert!(err.to_string().contains("RELAY_FELIX_TOKEN_FILE"));
+        assert!(err.to_string().contains("RELAY_IDP_TOKEN_FILE"));
     }
 
     #[test]

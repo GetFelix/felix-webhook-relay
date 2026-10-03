@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use felix_client::{ClientConfig, ClusterClient, IdempotentProducer, StartPosition};
+use felix_client::{ClientConfig, ClusterClient, IdempotentProducer, StartPosition, TokenProvider};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -25,7 +25,11 @@ pub(crate) struct Felix {
 }
 
 impl Felix {
-    pub(crate) async fn connect(config: &Config) -> Result<Self> {
+    pub(crate) async fn connect(
+        config: &Config,
+        namespace: &str,
+        tokens: Arc<dyn TokenProvider>,
+    ) -> Result<Self> {
         let roots = match &config.ca_file {
             Some(path) => {
                 let mut roots = RootCertStore::empty();
@@ -38,20 +42,18 @@ impl Felix {
             }
             None => None,
         };
-        let token = std::fs::read_to_string(&config.token_file)
-            .with_context(|| format!("read {}", config.token_file.display()))?;
 
         let quic = felix_client::quic_client_config(roots, true)?;
         let mut client_config = ClientConfig::optimized_defaults(quic);
         client_config.auth_tenant_id = Some(config.felix_tenant.clone());
-        client_config.auth_token = Some(token.trim().to_string());
+        client_config.token_provider = Some(tokens);
         let client = ClusterClient::connect(&config.brokers, &config.server_name, client_config)
             .await
             .context("connect to Felix")?;
         Ok(Self {
             client: Box::leak(Box::new(Arc::new(client))),
             tenant: config.felix_tenant.clone(),
-            namespace: config.tenant.clone(),
+            namespace: namespace.to_string(),
             producer: Mutex::new(None),
         })
     }
@@ -102,6 +104,29 @@ impl Felix {
             .await
             .with_context(|| format!("delete {cache}/{key}"))?;
         Ok(())
+    }
+
+    /// Add to a counter in `stats` without waiting. Counters are for the
+    /// dashboard: Felix counts a retried add twice, so they are approximate.
+    pub(crate) fn count(self: &Arc<Self>, key: String) {
+        let felix = Arc::clone(self);
+        tokio::spawn(async move {
+            let client = felix.client.client().await;
+            let added = client
+                .counter_add(&felix.tenant, &felix.namespace, "stats", &key, 1)
+                .await;
+            if let Err(err) = added {
+                tracing::debug!(%key, "not counted: {err:#}");
+            }
+        });
+    }
+
+    pub(crate) async fn counter(&self, key: &str) -> Result<i64> {
+        let client = self.client.client().await;
+        let value = client
+            .counter_get(&self.tenant, &self.namespace, "stats", key)
+            .await?;
+        Ok(value.unwrap_or(0))
     }
 
     /// The oldest offset `stream` still holds, and the offset the next record

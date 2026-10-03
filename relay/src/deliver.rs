@@ -12,9 +12,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use felix_relay_core::catalog::{Endpoint, owner};
+use felix_relay_core::jobs::JobKind;
 use tokio::task::JoinHandle;
 
 use crate::App;
+use crate::tenant::Tenant;
 pub(crate) use job::read_dead_letter;
 use send::Sender;
 use task::Task;
@@ -28,9 +30,19 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)
         .build()?;
+    let tenants = app
+        .tenants
+        .values()
+        .map(|tenant| supervise(Arc::clone(&app), Arc::clone(tenant), http.clone()));
+    futures_util::future::try_join_all(tenants).await?;
+    Ok(())
+}
+
+/// Run the tasks and jobs of one tenant's endpoints that this process owns.
+async fn supervise(app: Arc<App>, tenant: Arc<Tenant>, http: reqwest::Client) -> Result<()> {
     let config = &app.config;
-    let mut catalog = app.catalog.clone();
-    let mut jobs = app.jobs.clone();
+    let mut catalog = tenant.catalog.clone();
+    let mut jobs = tenant.jobs.clone();
     let mut running: HashMap<String, (Endpoint, JoinHandle<()>)> = HashMap::new();
     let mut running_jobs: HashMap<String, JoinHandle<()>> = HashMap::new();
     let owns = |id: &str| {
@@ -59,7 +71,13 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
             if running.contains_key(id) {
                 continue;
             }
-            let task = Task::new(Arc::clone(&app), id, endpoint, http.clone());
+            let task = Task::new(
+                Arc::clone(&app),
+                Arc::clone(&tenant),
+                id,
+                endpoint,
+                http.clone(),
+            );
             let handle = tokio::spawn(async move {
                 if let Err(err) = task.run().await {
                     tracing::error!("a delivery task stopped: {err:#}");
@@ -73,11 +91,12 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
             let Some(endpoint) = owned.get(&job.endpoint) else {
                 continue;
             };
-            if !job.active() || running_jobs.contains_key(id) {
+            if !job.active() || job.kind == JobKind::Retry || running_jobs.contains_key(id) {
                 continue;
             }
             let sender = Sender {
                 app: Arc::clone(&app),
+                tenant: Arc::clone(&tenant),
                 endpoint: job.endpoint.clone(),
                 source: endpoint.source.clone(),
                 http: http.clone(),
