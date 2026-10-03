@@ -117,7 +117,14 @@ A source verifies one of these schemes, named in its `scheme`:
 or `{"json": "data.id"}`. With one, every delivery carries the sender's id and
 a retry of a stored webhook answers `200` without storing it again.
 
-The admin API has no sign-in yet, so keep `RELAY_LISTEN` on a private address.
+The admin API has no sign-in yet. A process running the admin role refuses
+to listen on anything but a loopback address unless
+`RELAY_ADMIN_ALLOW_PUBLIC=true`, which is only for an admin process behind
+something that authenticates. In a deployment, run intake on its own.
+
+A `token` source's token is a secret in the URL path. The relay never writes
+request paths to its log or its metrics, but a proxy or load balancer in
+front of it may log them; prefer a signing scheme where the sender has one.
 
 The integration tests run the relay against that stack:
 
@@ -129,6 +136,7 @@ cargo test -- --include-ignored
 |---|---|---|
 | `RELAY_ROLES` | `intake,deliver,admin` | Which roles this process runs |
 | `RELAY_LISTEN` | `127.0.0.1:8090` | HTTP address for intake, the admin API, `/healthz` and `/metrics` |
+| `RELAY_ADMIN_ALLOW_PUBLIC` | `false` | Let a process with the admin role listen on a non-loopback address |
 | `RELAY_SECRET_KEY` | none, required | 32 bytes, base64 or hex, that seal every secret the relay stores in Felix |
 | `RELAY_FELIX_BROKERS` | `127.0.0.1:5000` | Comma-separated broker addresses |
 | `RELAY_FELIX_SERVER_NAME` | `localhost` | Name the broker certificate is checked against |

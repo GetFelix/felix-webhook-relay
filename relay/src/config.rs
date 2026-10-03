@@ -36,7 +36,9 @@ impl Roles {
 /// Relay settings. The defaults match the development stack in `dev/`.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    /// `RELAY_LISTEN`. Default `127.0.0.1:8090`.
+    /// `RELAY_LISTEN`. Default `127.0.0.1:8090`. With the admin role it must
+    /// be a loopback address unless `RELAY_ADMIN_ALLOW_PUBLIC=true`, because
+    /// the admin API has no sign-in yet.
     pub(crate) listen: SocketAddr,
     /// `RELAY_ROLES`: any of `intake`, `deliver`, `admin`, comma-separated.
     /// Default all three.
@@ -72,12 +74,22 @@ impl Config {
         let secret_key = var("RELAY_SECRET_KEY").context(
             "RELAY_SECRET_KEY is required: 32 random bytes, base64 or hex, e.g. `openssl rand -base64 32`",
         )?;
+        let listen: SocketAddr = or("RELAY_LISTEN", "127.0.0.1:8090")
+            .parse()
+            .context("parse RELAY_LISTEN")?;
+        let roles = Roles::parse(&or("RELAY_ROLES", "intake,deliver,admin"))
+            .context("parse RELAY_ROLES")?;
+        let allow_public = or("RELAY_ADMIN_ALLOW_PUBLIC", "false") == "true";
+        if roles.admin && !listen.ip().is_loopback() && !allow_public {
+            bail!(
+                "the admin API has no sign-in, so with the admin role RELAY_LISTEN must be a \
+                 loopback address; run admin in its own process, or set \
+                 RELAY_ADMIN_ALLOW_PUBLIC=true if something in front of it authenticates"
+            );
+        }
         Ok(Self {
-            listen: or("RELAY_LISTEN", "127.0.0.1:8090")
-                .parse()
-                .context("parse RELAY_LISTEN")?,
-            roles: Roles::parse(&or("RELAY_ROLES", "intake,deliver,admin"))
-                .context("parse RELAY_ROLES")?,
+            listen,
+            roles,
             brokers: or("RELAY_FELIX_BROKERS", "127.0.0.1:5000")
                 .split(',')
                 .map(|addr| addr.trim().parse())
@@ -128,6 +140,24 @@ mod tests {
             }
         );
         assert_eq!(config.tenant, "acme");
+    }
+
+    #[test]
+    fn the_admin_api_binds_to_loopback_by_default() {
+        let default = config(&REQUIRED).unwrap();
+        assert!(default.roles.admin && default.listen.ip().is_loopback());
+
+        let mut public = REQUIRED.to_vec();
+        public.push(("RELAY_LISTEN", "0.0.0.0:8090"));
+        let err = config(&public).unwrap_err();
+        assert!(err.to_string().contains("RELAY_ADMIN_ALLOW_PUBLIC"));
+
+        let mut intake_only = public.clone();
+        intake_only.push(("RELAY_ROLES", "intake,deliver"));
+        assert!(config(&intake_only).is_ok());
+
+        public.push(("RELAY_ADMIN_ALLOW_PUBLIC", "true"));
+        assert!(config(&public).is_ok());
     }
 
     #[test]

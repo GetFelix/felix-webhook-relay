@@ -5,7 +5,7 @@
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -63,6 +63,11 @@ pub struct Relay {
 
 impl Relay {
     pub async fn start(roles: &str, env: &[(&str, &str)]) -> Self {
+        Self::start_logging(roles, env, Stdio::inherit()).await
+    }
+
+    /// Like [`Relay::start`], with its log written to `log`.
+    pub async fn start_logging(roles: &str, env: &[(&str, &str)], log: Stdio) -> Self {
         let addr = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -75,7 +80,7 @@ impl Relay {
         for (name, value) in env {
             command.env(name, value);
         }
-        let child = command.spawn().expect("start felix-relay");
+        let child = command.stdout(log).spawn().expect("start felix-relay");
         let mut relay = Self {
             child,
             addr,

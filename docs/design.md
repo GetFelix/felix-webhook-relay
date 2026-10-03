@@ -490,7 +490,9 @@ Intake verifies four schemes in M1: Standard Webhooks, GitHub's
 tolerance, and a generic HMAC-SHA256 header with a configurable name, hex or
 base64. A source with no scheme must use a long random token instead, sent as
 the last path segment, `/in/<tenant>/<source>/<token>`, and the admin page
-says plainly that it is weaker. The unit tests use the published vectors for
+says plainly that it is weaker. The relay never logs request paths or puts
+them in metrics, and a test checks the token stays out of a trace-level log,
+but a proxy in front of the relay may still log the URL. The unit tests use the published vectors for
 Standard Webhooks and GitHub; Stripe documents its construction but not a
 vector with a known secret, so its vector was computed outside the relay.
 
@@ -571,7 +573,9 @@ at build time beyond crates.
 **The JSON API comes before the page and sign-in.** Sources and endpoints
 have to be written somewhere from M1 on, so the routes that write them land
 first, with no sign-in and the relay's own Felix connection. Until sign-in
-lands, the admin listener belongs on a private address. A secret given to the
+lands, a process running the admin role refuses a non-loopback `RELAY_LISTEN`
+unless `RELAY_ADMIN_ALLOW_PUBLIC=true` says something in front of it
+authenticates. A secret given to the
 API is sealed before it is written and never shown again; one the relay makes
 up is shown once, in the answer that created it.
 
