@@ -8,6 +8,7 @@ mod deliver;
 mod felix;
 mod intake;
 mod metrics;
+mod report;
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -104,6 +104,22 @@ impl Felix {
         Ok(())
     }
 
+    /// Publish without waiting for the broker to store it, for records that
+    /// are a trail rather than a source of truth.
+    pub(crate) async fn publish_unacked(&self, stream: &str, payload: Vec<u8>) -> Result<()> {
+        self.client
+            .publish(
+                &self.tenant,
+                &self.namespace,
+                stream,
+                payload,
+                felix_wire::AckMode::None,
+            )
+            .await
+            .with_context(|| format!("publish to {stream}"))?;
+        Ok(())
+    }
+
     /// Append one record to `stream` exactly once and return its offset.
     ///
     /// Runs on its own task: dropping an idempotent publish midway stops the

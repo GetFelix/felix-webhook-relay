@@ -51,6 +51,9 @@ services:
       FELIX_TLS_CERT_EXPORT: /state/broker-cert.pem
       # One listener, so the one published UDP port is the only one clients use.
       FELIX_QUIC_LISTENERS: "1"
+      # Short, so tests see claims lapse while a worker retries. A relay on
+      # this stack sets RELAY_CLAIM_WAIT_MS=5000 to match.
+      FELIX_GROUP_VISIBILITY_TIMEOUT_MS: "5000"
       RUST_LOG: info
     ports:
       - "127.0.0.1:5000:5000/udp"
