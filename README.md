@@ -1,7 +1,13 @@
-# Felix Webhook Relay
+<p align="center">
+  <img src="docs/brand/felix-webhook-relay-mark.png" alt="Felix Webhook Relay: the Felix cat with one webhook coming in and three deliveries going out, one retrying" width="320">
+</p>
 
-A self-hosted webhook relay whose entire backend is [Felix](https://github.com/gabloe/felix).
-No Postgres, Redis or job queue beside it.
+<h1 align="center">Felix Webhook Relay</h1>
+
+<p align="center">
+  A self-hosted webhook relay whose entire backend is <a href="https://github.com/gabloe/felix">Felix</a>.<br>
+  No Postgres, Redis or job queue beside it.
+</p>
 
 It takes webhooks in over HTTP, verifies their signatures, and stores them
 durably before answering. It delivers each one to its endpoints, signed, with
