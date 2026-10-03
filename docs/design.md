@@ -708,10 +708,18 @@ The poll histogram uses intake's clock against the worker's, so across hosts
 it includes their clock skew.
 
 **Intake throughput needs batching.** An idempotent producer serialises its
-publishes to a stream, and intake has one producer per process, so today it
-appends one webhook per broker round trip. The 5,000 per second target needs
-concurrent webhooks gathered into one `publish_batch`, which takes one
-sequence whatever its size. That is M6 work; M0 appends one at a time.
+publishes to a stream, and intake has one producer per process, so one
+webhook per append would mean one broker round trip each. Intake hands every
+append to one task per connection, which gathers whatever arrived while the
+previous batch was in flight into one `publish_batch` (one sequence, records at
+consecutive offsets). Measured results, with their conditions, are in
+[performance.md](performance.md).
+
+**Group operations per source are the ceiling.** Each delivery is a poll and an
+acknowledgement on the source's one shard, each committed before it answers,
+so all of a source's endpoints share that shard's rate: about 500 deliveries a
+second on a single shared host with fsync on commit. A source should not carry
+hundreds of busy endpoints.
 
 ## Build order
 
@@ -766,7 +774,7 @@ real brokers.
 - Retention set too short. Then outages and replays lose events. The relay warns, but it cannot change the broker's setting.
 - Static assignment misconfigured. Two workers on one index break ordering. Detected, not prevented.
 - The 30 s restart pause. Every deploy stalls every endpoint for 30 s until felix#962 lands. Acceptable for webhooks, but visible.
-- Group walk on endpoint creation. A long-retained source makes creating an endpoint expensive until Felix can start a group at an offset.
+- Group walk on endpoint creation. A long-retained source makes creating an endpoint expensive until Felix can start a group at an offset: about 1,000 records a second on one host, so a source holding ten million records takes hours to walk. The relay acknowledges each poll's skipped records together, which is as fast as one shard commits them.
 
 **Felix gaps this design works around:**
 
@@ -780,7 +788,11 @@ real brokers.
 | No consumer group deletion | Leave idle groups behind | Not filed |
 | No offset-for-time on the native API, and consumers never see the append timestamp | `received_at` in the envelope and a binary search over the log | Not filed |
 | No conditional cache put | Idempotency check races; static endpoint assignment; last-writer-wins config | Not filed |
-| Retention is broker-wide only | Document it and warn | Not filed |
+| Retention is broker-wide only | Warn at startup and on the admin page when a trimmed source's oldest record is younger than `RELAY_DISABLE_AFTER` plus `RELAY_REPLAY_WINDOW` | Not filed |
+| A dropped subscription keeps its stream until the broker next writes to it, so quiet streams leak them up to the connection's 1,024 | Short reads go through a connection that is replaced every 400 subscriptions | Not filed |
+| A waiting group poll holds a stream, so a thousand idle endpoints fill a connection | Group traffic is spread over four connections per tenant | Not filed |
+| No batched acknowledgement: one request, and one commit, per record | None; it bounds deliveries per source (see [performance.md](performance.md)) | Not filed |
+| A restarted broker generates a new self-signed certificate | The dev stack makes one certificate for every broker | By design (production brokers are given one) |
 | Segment size and preallocation are broker-wide, so each stream reserves a full segment | Document the disk cost per source; dev stack turns preallocation off | Not filed |
 | Streams and caches created only through the control plane | The admin role calls the REST API | By design |
 | Offsets on acks need a broker-wide setting | Idempotent producer returns them | [felix#956](https://github.com/gabloe/felix/issues/956) |

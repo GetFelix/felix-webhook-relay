@@ -1,0 +1,11 @@
+# Retention far shorter than the relay needs, laid over docker-compose.yml,
+# so the retention test sees the broker trim a source and the relay warn.
+# `dev/up.sh --retention` starts it.
+
+services:
+  broker:
+    environment:
+      FELIX_DURABLE_RETENTION_SECONDS: "5"
+      FELIX_DURABLE_RETENTION_INTERVAL_SECONDS: "1"
+      # Small segments, so a few hundred webhooks seal some to trim.
+      FELIX_DURABLE_SEGMENT_BYTES: "65536"

@@ -14,7 +14,7 @@ durably before answering. It delivers each one to its endpoints, signed, with
 retries and backoff. It sets aside what an endpoint keeps refusing, and it can
 replay any endpoint over a time range after an outage.
 
-**Status: M5 done.** Sources and endpoints live in Felix, written through
+**Status: M6 done.** Sources and endpoints live in Felix, written through
 the admin API with their secrets sealed. Intake verifies Standard Webhooks,
 GitHub, Stripe and generic HMAC signatures before anything is stored, and
 dedupes retries on the sender's event id. Deliveries are signed with
@@ -29,8 +29,10 @@ disabled until an operator enables it. Any endpoint can replay a time or
 offset range from the log beside live delivery, and dead letters can be
 redriven or discarded. One process serves many tenants, each confined to
 its own Felix namespace by narrowed tokens, and admins sign in to a plain
-HTML page or use the JSON API. Crash tests, performance and packaging are
-still to come.
+HTML page or use the JSON API. Killing intake, a worker, or any broker of a
+three-broker cluster under load loses nothing that was acknowledged, and the
+measured performance is in [docs/performance.md](docs/performance.md).
+Packaging for self-hosting is still to come.
 The design and the plan are in [docs/design.md](docs/design.md).
 
 ## Why it exists
@@ -159,6 +161,15 @@ The integration tests run the relay against that stack:
 cargo test -- --include-ignored
 ```
 
+`dev/up.sh --cluster` starts three replicating brokers instead, for the crash
+test, and `dev/up.sh --retention` a broker that keeps records for seconds, for
+the retention guard:
+
+```bash
+dev/up.sh --cluster && RELAY_TEST_CLUSTER=1 cargo test --test crash -- --include-ignored
+dev/up.sh --retention && RELAY_TEST_RETENTION=1 cargo test --test retention -- --include-ignored
+```
+
 | Variable | Default | What |
 |---|---|---|
 | `RELAY_ROLES` | `intake,deliver,admin` | Which roles this process runs |
@@ -173,6 +184,8 @@ cargo test -- --include-ignored
 | `RELAY_IDP_TOKEN_FILE` | none, required | An ID token for the relay's service principal, read again before each token exchange |
 | `RELAY_FELIX_CONTROL_PLANE` | `http://127.0.0.1:8443` | Where tokens are exchanged and streams created |
 | `RELAY_FELIX_TENANT` | `relay` | The Felix tenant of the deployment |
+| `RELAY_STREAM_REPLICAS` | `1` | Brokers that hold each new source's stream; above 1 its writes wait for a majority |
+| `RELAY_REPLAY_WINDOW` | `7d` | How far back replays should reach; the relay warns when broker retention is shorter than this plus `RELAY_DISABLE_AFTER` |
 | `RELAY_TENANTS` | `acme` | Comma-separated relay tenants this process serves, each a Felix namespace |
 | `RELAY_WORKER_INDEX` | `0` | This delivery process's index; it owns the endpoints whose id hashes to it |
 | `RELAY_WORKER_COUNT` | `1` | How many delivery processes share the endpoints |
@@ -213,7 +226,7 @@ cache under `health/<endpoint>`.
 | 3 | Many sources and endpoints, ordered and unordered | One slow endpoint does not delay the others | Done |
 | 4 | Replay and redrive | Any endpoint replays a time range from the log | Done |
 | 5 | Tenants, narrowed tokens, the admin page | Tenant isolation enforced by the broker | Done |
-| 6 | Crash and failover tests, performance targets | Nothing acknowledged is lost | |
+| 6 | Crash and failover tests, performance targets | Nothing acknowledged is lost | Done |
 | 7 | Images, compose, Helm, a self-hosting guide | Anyone can self-host it | |
 
 Each milestone is a [GitHub milestone](https://github.com/gabloe/felix-webhook-relay/milestones)
