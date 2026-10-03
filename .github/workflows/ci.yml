@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Job names are required checks on main. Rename them only together with the
+# branch protection rule.
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the tests
+        run: cargo test --locked --no-run
+      - name: Start Felix
+        run: dev/up.sh
+      - name: Integration tests
+        run: |
+          export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
+          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
+          cargo test --locked --test delivery -- --include-ignored --nocapture
+      - name: Felix logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml logs
