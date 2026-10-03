@@ -30,6 +30,19 @@ impl std::fmt::Display for SecretError {
 
 impl std::error::Error for SecretError {}
 
+impl Sealed {
+    /// The stored form, which is also safe in a cookie.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Sealed {
+    fn from(stored: String) -> Self {
+        Self(stored)
+    }
+}
+
 impl std::fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("SecretKey(..)")

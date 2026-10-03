@@ -97,6 +97,9 @@ pub enum JobKind {
     },
     /// Send the envelope kept with the dead letter at this offset of `dead`.
     Redrive { dead_offset: u64 },
+    /// Cut a paused endpoint's backoff wait short. The endpoint's own task
+    /// takes this, at its next wait.
+    Retry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
