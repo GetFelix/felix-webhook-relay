@@ -62,6 +62,13 @@ async fn main() -> Result<()> {
             let tenant = Tenant::open(&config, name, tokens)
                 .await
                 .with_context(|| format!("open tenant {name}"))?;
+            // Reading the streams needs `stream.subscribe`, which intake's
+            // narrowed token does not have.
+            if config.roles.deliver {
+                for warning in tenant.retention_warnings(&config).await {
+                    tracing::warn!(tenant = %name, "retention: {warning}");
+                }
+            }
             tenants.insert(name.clone(), tenant);
         }
     }

@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::jobs::dead_letters;
 use crate::catalog::STATE;
+use crate::config::Config;
 use crate::session::{self, Denied, Identity};
 use crate::tenant::Tenant;
 use crate::{App, unix_millis};
@@ -47,7 +48,7 @@ async fn page(
     Path(tenant): Path<String>,
 ) -> Response {
     match session::admin_tenant(&app, &headers, &tenant).await {
-        Ok((open, who)) => match render(&open, &who).await {
+        Ok((open, who)) => match render(&app.config, &open, &who).await {
             Ok(html) => Html(html).into_response(),
             Err(err) => {
                 tracing::error!("admin page: {err:#}");
@@ -87,7 +88,7 @@ async fn page(
     }
 }
 
-async fn render(tenant: &Tenant, who: &Identity) -> anyhow::Result<String> {
+async fn render(config: &Config, tenant: &Tenant, who: &Identity) -> anyhow::Result<String> {
     let name = esc(&tenant.name);
     let api = format!("/api/{}", tenant.name);
     let catalog = Arc::clone(&tenant.catalog.borrow());
@@ -103,6 +104,9 @@ async fn render(tenant: &Tenant, who: &Identity) -> anyhow::Result<String> {
         esc(&who.name)
     );
 
+    for warning in tenant.retention_warnings(config).await {
+        let _ = write!(out, "<p class=bad><b>Retention:</b> {}</p>", esc(&warning));
+    }
     out.push_str("<h2>Sources</h2><table><tr><th>Source</th><th>Scheme</th><th>Received</th><th>Tail</th><th>Oldest held</th></tr>");
     for (id, source) in &sources {
         let stream = format!("src.{id}");

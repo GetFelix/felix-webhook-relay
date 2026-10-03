@@ -130,6 +130,19 @@ impl Job {
     }
 }
 
+/// Whether a source's retention is shorter than the relay needs: its log
+/// has been trimmed (`oldest_offset` above zero) and the oldest record it
+/// still holds is younger than `needed`, which is the disable window plus
+/// the replay window. An untrimmed log says nothing about retention yet.
+pub fn retention_too_short(
+    oldest_offset: u64,
+    oldest_received_at: u64,
+    now: u64,
+    needed_ms: u64,
+) -> bool {
+    oldest_offset > 0 && now.saturating_sub(oldest_received_at) < needed_ms
+}
+
 /// Whether a record received at `received_at` is inside a replay's window.
 pub fn in_window(received_at: u64, since: Option<u64>, until: Option<u64>) -> bool {
     since.is_none_or(|since| received_at >= since) && until.is_none_or(|until| received_at < until)
@@ -233,6 +246,14 @@ mod tests {
                 "{target}: started past a record in the window"
             );
         }
+    }
+
+    #[test]
+    fn retention_is_short_only_once_the_log_was_trimmed() {
+        let hour = 3_600_000;
+        assert!(!retention_too_short(0, 0, 10 * hour, 5 * hour), "untrimmed");
+        assert!(retention_too_short(500, 9 * hour, 10 * hour, 5 * hour));
+        assert!(!retention_too_short(500, 4 * hour, 10 * hour, 5 * hour));
     }
 
     #[test]

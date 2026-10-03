@@ -89,8 +89,8 @@ impl Task {
         }
     }
 
-    fn felix(&self) -> &'static ClusterClient {
-        self.tenant.felix.client()
+    fn felix(&self) -> &ClusterClient {
+        self.tenant.felix.group_client(&self.endpoint)
     }
 
     pub(super) async fn run(mut self) -> Result<()> {
@@ -133,12 +133,16 @@ impl Task {
             };
             let polled_at = unix_millis();
             let mut wanted = Vec::new();
+            let mut skipped = Vec::new();
             for record in records {
                 match self.take(record.offset, &record.payload, polled_at).await? {
                     Some(held) => wanted.push(held),
-                    None => self.ack(record.offset).await,
+                    None => skipped.push(record.offset),
                 }
             }
+            // Records it does not want, or that predate it, settle together:
+            // a new endpoint on a long log acknowledges its way past all of it.
+            join_all(skipped.into_iter().map(|offset| self.ack(offset))).await;
             match self.mode {
                 Mode::Ordered => {
                     for held in wanted {
