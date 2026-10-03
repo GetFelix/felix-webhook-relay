@@ -396,3 +396,49 @@ async fn the_relay_refuses_to_start_without_its_key() {
     std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
     assert!(stderr.contains("RELAY_SECRET_KEY"), "{stderr}");
 }
+
+#[tokio::test]
+#[ignore = "needs a Felix broker"]
+async fn a_url_token_never_reaches_the_log() {
+    let source = unique("redact");
+    let log_path = std::env::temp_dir().join(format!("{source}.log"));
+    let log = std::fs::File::create(&log_path).unwrap();
+    let relay =
+        Relay::start_logging("intake,admin", &[("RUST_LOG", "trace")], Stdio::from(log)).await;
+    let token = relay
+        .create_source(&source, json!({ "scheme": { "type": "token" } }))
+        .await
+        .unwrap();
+    let good = relay
+        .send(&format!("/in/{TENANT}/{source}/{token}"), &[], b"{}")
+        .await;
+    assert_eq!(good.status(), StatusCode::ACCEPTED);
+    let wrong = format!("{}x", &token[..token.len() - 1]);
+    let path = format!("/in/{TENANT}/{source}/{wrong}");
+    let refused = relay
+        .http
+        .post(relay.url(&path))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let metrics = reqwest::get(relay.url("/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    drop(relay);
+
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(log.contains(&source), "the log was captured");
+    for secret in [&token, &wrong] {
+        assert!(!log.contains(secret.as_str()), "a token reached the log");
+        assert!(
+            !metrics.contains(secret.as_str()),
+            "a token reached /metrics"
+        );
+    }
+    let _ = std::fs::remove_file(log_path);
+}
