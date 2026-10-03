@@ -747,6 +747,65 @@ canvas there is no large frontend to swallow time, so the risk is in the
 delivery state machine, which is why it lives in a pure crate with its own
 tests from M0.
 
+## Configuration
+
+### Sources and endpoints
+
+Sources and endpoints are written through the admin API or the admin page. A
+source names the scheme intake verifies in its `scheme`:
+
+| `type` | The sender signs with |
+|---|---|
+| `standard-webhooks` | `webhook-id`, `webhook-timestamp`, `webhook-signature`, under a `whsec_` secret |
+| `github` | `X-Hub-Signature-256` |
+| `stripe` | `Stripe-Signature`, with its timestamp |
+| `hmac` | HMAC-SHA256 of the body in the header named by `header`, `hex` or `base64` per `encoding` |
+| `token` | Nothing; the token in the URL is the secret, which is weaker |
+
+A source with a `token` scheme gets a long random token in its URL,
+`/in/<tenant>/<source>/<token>`, shown once in the answer that created it. A
+source's `event_id` says where the sender puts its event id,
+`{"header": "webhook-id"}` or `{"json": "data.id"}`. With one, every delivery
+carries the sender's id, and a retry of a stored webhook answers `200` without
+storing it again.
+
+An endpoint names its `source` and `url`, and the answer that creates it holds
+its `whsec_` signing secret. It also takes `"mode": "unordered"` with a
+`"window"` of requests in flight (default 16), `"event_types"` to receive only
+some, and `"backfill": true` to start from the beginning of the source's log
+instead of its tail.
+
+### Environment
+
+Every relay process reads these variables.
+
+| Variable | Default | What |
+|---|---|---|
+| `RELAY_ROLES` | `intake,deliver,admin` | Which roles this process runs |
+| `RELAY_LISTEN` | `127.0.0.1:8090` | HTTP address for intake, the admin API, `/healthz` and `/metrics` |
+| `RELAY_PUBLIC_URL` | `http://<RELAY_LISTEN>` | Where browsers reach the relay, for the sign-in redirect |
+| `RELAY_OIDC_ISSUER` | none; required for `admin` | The IdP admins sign in with |
+| `RELAY_OIDC_CLIENT_ID`, `RELAY_OIDC_CLIENT_SECRET` | none; required for `admin` | The relay's client at that IdP |
+| `RELAY_OIDC_INTERNAL_URL` | the issuer | Where the relay reaches the IdP when it cannot at the issuer's address; replaces the issuer at the start of the discovery and token endpoint URLs |
+| `RELAY_SECRET_KEY` | none, required | 32 bytes, base64 or hex, that seal every secret the relay stores in Felix |
+| `RELAY_FELIX_BROKERS` | `127.0.0.1:5000` | Comma-separated broker addresses, `host:port`, resolved at each connection |
+| `RELAY_FELIX_SERVER_NAME` | `localhost` | Name the broker certificate is checked against |
+| `RELAY_FELIX_CA_FILE` | platform roots | PEM certificates to trust for the broker |
+| `RELAY_IDP_TOKEN_FILE` | none, required | An ID token for the relay's service principal, read again before each token exchange |
+| `RELAY_FELIX_CONTROL_PLANE` | `http://127.0.0.1:8443` | Where tokens are exchanged and streams created |
+| `RELAY_FELIX_TENANT` | `relay` | The Felix tenant of the deployment |
+| `RELAY_STREAM_REPLICAS` | `1` | Brokers that hold each new source's stream; above 1 its writes wait for a majority |
+| `RELAY_REPLAY_WINDOW` | `7d` | How far back replays should reach; the relay warns when broker retention is shorter than this plus `RELAY_DISABLE_AFTER` |
+| `RELAY_TENANTS` | `acme` | Comma-separated relay tenants this process serves, each a Felix namespace |
+| `RELAY_WORKER_INDEX` | `0` | This delivery process's index; it owns the endpoints whose id hashes to it |
+| `RELAY_WORKER_COUNT` | `1` | How many delivery processes share the endpoints |
+| `RELAY_ENDPOINT_PREFIXES` | all | Comma-separated; only endpoints whose ids start with one of these |
+| `RELAY_CLAIM_WAIT_MS` | `30000` | Wait before the first poll; at least the broker's `FELIX_GROUP_VISIBILITY_TIMEOUT_MS` (5000 on the dev stack) |
+| `RELAY_BACKOFF` | `5s,15s,1m,2m,5m` | Waits between probes of a paused endpoint; the last repeats |
+| `RELAY_REFUSED_RETRIES` | `5s,30s` | Waits before each retry of a refused record, then it is dead-lettered |
+| `RELAY_DISABLE_AFTER` | `72h` | How long an endpoint may fail without a break before it is disabled |
+| `RELAY_WORKER_NAME` | host name and pid | Names this process in endpoint health entries |
+
 ## Self-hosting
 
 Mirrors felix-canvas's packaging. [self-hosting.md](self-hosting.md) is the guide.

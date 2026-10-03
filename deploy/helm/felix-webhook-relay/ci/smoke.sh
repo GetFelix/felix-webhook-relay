@@ -7,8 +7,8 @@ kubectl port-forward svc/felix-webhook-relay-intake 8091:80 >/dev/null &
 kubectl port-forward svc/felix-webhook-relay-admin 8090:80 >/dev/null &
 kubectl port-forward svc/dex 5556:5556 >/dev/null &
 for _ in $(seq 1 30); do
-  curl -fsS http://127.0.0.1:8091/healthz >/dev/null && curl -fsS http://127.0.0.1:8090/healthz >/dev/null &&
-    curl -fsS http://127.0.0.1:5556/dex/.well-known/openid-configuration >/dev/null && break
+  curl -fs http://127.0.0.1:8091/healthz >/dev/null && curl -fs http://127.0.0.1:8090/healthz >/dev/null &&
+    curl -fs http://127.0.0.1:5556/dex/.well-known/openid-configuration >/dev/null && break
   sleep 2
 done
 RELAY_URL=http://127.0.0.1:8091 ADMIN_URL=http://127.0.0.1:8090 RECEIVER_URL=http://receiver:9000/hook \
