@@ -3,7 +3,7 @@
 //! the endpoint's state changes.
 
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use felix_relay_core::health::State;
 use felix_relay_core::records::HealthReport;
@@ -14,6 +14,9 @@ use crate::felix::Felix;
 use crate::unix_millis;
 
 const EVERY: Duration = Duration::from_secs(3);
+/// An unchanged report is still written this often, so its `updated_at`
+/// shows the worker is alive.
+const HEARTBEAT: Duration = Duration::from_secs(60);
 /// Only the latest gaps are kept; an operator needs to see that they
 /// happen, not every one.
 const MAX_GAPS: usize = 20;
@@ -42,12 +45,23 @@ impl Reporter {
         let wake = Arc::clone(&now);
         let key = format!("health/{endpoint}");
         tokio::spawn(async move {
+            let mut written: Option<HealthReport> = None;
+            let mut last_write = Instant::now();
             loop {
                 let _ = tokio::time::timeout(EVERY, wake.notified()).await;
                 let Some(report) = weak.upgrade() else { return };
+                // An idle endpoint's report does not change, and a thousand
+                // of them rewriting it every few seconds is load for nothing.
                 let json = {
                     let mut report = report.lock().unwrap();
+                    let mut unchanged = report.clone();
+                    unchanged.updated_at = written.as_ref().map_or(0, |w| w.updated_at);
+                    if written.as_ref() == Some(&unchanged) && last_write.elapsed() < HEARTBEAT {
+                        continue;
+                    }
                     report.updated_at = unix_millis();
+                    written = Some(report.clone());
+                    last_write = Instant::now();
                     serde_json::to_vec(&*report).expect("a report serializes")
                 };
                 if let Err(err) = felix.cache_put(STATE, &key, json, None).await {

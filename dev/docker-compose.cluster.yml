@@ -1,0 +1,83 @@
+# Three brokers instead of one, laid over docker-compose.yml, for the crash
+# tests. Every stream and cache is replicated to all three with Quorum
+# writes, so losing any one broker leaves a majority holding every
+# acknowledged write. `dev/up.sh --cluster` starts it.
+#
+#   broker    client 127.0.0.1:5000/udp, health 127.0.0.1:8080
+#   broker-2  client 127.0.0.1:5010/udp, health 127.0.0.1:8081
+#   broker-3  client 127.0.0.1:5020/udp, health 127.0.0.1:8082
+
+networks:
+  default:
+    ipam:
+      config:
+        # Brokers dial each other by IP; Felix refuses a hostname there.
+        - subnet: 172.30.9.0/24
+
+services:
+  controlplane:
+    environment:
+      # Short liveness windows, so a killed broker's shards move within a few
+      # seconds rather than the default of about twenty.
+      FELIX_NODE_HEARTBEAT_INTERVAL_MS: "500"
+      FELIX_NODE_EXPIRY_TIMEOUT_MS: "3000"
+      FELIX_NODE_EXPIRY_SWEEP_INTERVAL_MS: "250"
+      FELIX_SHARD_RECONCILE_INTERVAL_MS: "500"
+
+  seed:
+    environment:
+      REPLICAS: "3"
+
+  broker:
+    environment: &cluster
+      FELIX_NODE_ID: broker-1
+      FELIX_NODE_ADVERTISE_ADDR: 172.30.9.11:5001
+      FELIX_CLIENT_ADVERTISE_ADDR: 127.0.0.1:5000
+      # Only the brokers can reach the internal port on this network.
+      FELIX_INTERNAL_ALLOW_UNAUTHENTICATED: "true"
+      FELIX_CONTROLPLANE_SYNC_INTERVAL_MS: "500"
+    networks:
+      default:
+        ipv4_address: 172.30.9.11
+
+  broker-2:
+    extends:
+      file: docker-compose.yml
+      service: broker
+    environment:
+      <<: *cluster
+      FELIX_NODE_ID: broker-2
+      FELIX_NODE_ADVERTISE_ADDR: 172.30.9.12:5001
+      FELIX_CLIENT_ADVERTISE_ADDR: 127.0.0.1:5010
+    ports: !override
+      - "127.0.0.1:5010:5000/udp"
+      - "127.0.0.1:8081:8080"
+    volumes: !override
+      - ./state:/state
+      - felix-data-2:/var/lib/felix
+    networks:
+      default:
+        ipv4_address: 172.30.9.12
+
+  broker-3:
+    extends:
+      file: docker-compose.yml
+      service: broker
+    environment:
+      <<: *cluster
+      FELIX_NODE_ID: broker-3
+      FELIX_NODE_ADVERTISE_ADDR: 172.30.9.13:5001
+      FELIX_CLIENT_ADVERTISE_ADDR: 127.0.0.1:5020
+    ports: !override
+      - "127.0.0.1:5020:5000/udp"
+      - "127.0.0.1:8082:8080"
+    volumes: !override
+      - ./state:/state
+      - felix-data-3:/var/lib/felix
+    networks:
+      default:
+        ipv4_address: 172.30.9.13
+
+volumes:
+  felix-data-2:
+  felix-data-3:

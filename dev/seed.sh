@@ -16,6 +16,10 @@ TENANT=${RELAY_FELIX_TENANT:-relay}
 TENANTS=${RELAY_TENANTS:-acme globex}
 ADMINS=${RELAY_TENANT_ADMINS:-acme=alice@example.com globex=bob@example.com}
 AUDIENCE=felix-webhook-relay
+# 3 on the three-broker stack: every stream and cache on every broker, and
+# writes wait for a majority.
+REPLICAS=${REPLICAS:-1}
+if [ "$REPLICAS" -gt 1 ]; then CONSISTENCY=Quorum; else CONSISTENCY=Leader; fi
 PEOPLE=${DEX_ISSUER:-http://127.0.0.1:5556/dex}
 PEOPLE_JWKS=${DEX_JWKS:-http://dex:5556/dex/keys}
 PEOPLE_AUDIENCE=${DEX_CLIENT_ID:-relay-admin}
@@ -99,6 +103,7 @@ call POST "$BOOTSTRAP/internal/bootstrap/tenants/$TENANT/initialize" "$(jq -n \
       {subject: "role:admin", object: $streams, action: "stream.manage"},
       {subject: "role:admin", object: $caches, action: "cache.manage"},
       {subject: "role:broker", object: "cluster:*", action: "node.view"},
+      {subject: "role:broker", object: "cluster:*", action: "node.manage"},
       {subject: "role:relay", object: $streams, action: "stream.publish"},
       {subject: "role:relay", object: $streams, action: "stream.subscribe"},
       {subject: "role:relay", object: $streams, action: "group.manage"},
@@ -117,13 +122,13 @@ auth="authorization: Bearer $admin"
 base="$CONTROL_PLANE/v1/tenants/$TENANT/namespaces"
 
 stream_body() {
-  jq -n --arg stream "$1" '{
+  jq -n --arg stream "$1" --argjson replicas "$REPLICAS" --arg consistency "$CONSISTENCY" '{
     stream: $stream,
     kind: "Stream",
     shards: 1,
-    replication_factor: 1,
+    replication_factor: $replicas,
     retention: {max_age_seconds: null, max_size_bytes: null},
-    consistency: "Leader",
+    consistency: $consistency,
     delivery: "AtLeastOnce",
     durable: true
   }'
@@ -138,8 +143,10 @@ for ns in $TENANTS; do
   done
   # One shard each: a retained prefix watch reads a single shard.
   for cache in config idem state stats; do
-    call POST "$base/$ns/caches" \
-      "{\"cache\": \"$cache\", \"display_name\": \"$cache\", \"shards\": 1}" -H "$auth" >/dev/null
+    call POST "$base/$ns/caches" "$(jq -n --arg cache "$cache" --argjson replicas "$REPLICAS" \
+      --arg consistency "$CONSISTENCY" \
+      '{cache: $cache, display_name: $cache, shards: 1, replication_factor: $replicas, consistency: $consistency}')" \
+      -H "$auth" >/dev/null
   done
   # Who may administer this tenant: everything in its namespace, including
   # creating sources' streams.
@@ -161,7 +168,16 @@ for pair in $ADMINS; do
     --arg role "role:relay-tenant-$ns" '{user: $user, role: $role}')" -H "$auth" >/dev/null
 done
 
-# The broker runs as uid 65532 and writes its certificate here too.
+# One certificate every broker serves, made once, so a broker that restarts
+# keeps the identity the relay trusts. Development only: the key is readable.
+if [ ! -s "$STATE/broker-cert.pem" ]; then
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
+    -addext basicConstraints=critical,CA:FALSE -addext extendedKeyUsage=serverAuth \
+    -keyout "$STATE/broker-key.pem" -out "$STATE/broker-cert.pem" 2>/dev/null
+fi
+# The broker runs as uid 65532.
+chmod 644 "$STATE/broker-cert.pem" "$STATE/broker-key.pem"
 chmod 777 "$STATE"
 # Creating a source's stream goes through the control plane with this token.
 echo "$admin" >"$STATE/admin.token"
