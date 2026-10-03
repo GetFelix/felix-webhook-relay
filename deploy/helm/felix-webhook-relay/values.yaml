@@ -1,0 +1,123 @@
+# Default values for the felix-webhook-relay chart. docs/self-hosting.md
+# describes the install and the relay setting each value sets.
+
+image:
+  repository: ghcr.io/gabloe/felix-webhook-relay
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # Pin by digest in production: images are signed by digest. Wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# The Felix release this one runs next to.
+felix:
+  # The control plane's API, e.g. http://felix-controlplane:8443. Required.
+  controlPlaneUrl: ""
+  # Broker addresses as host:port, e.g. [felix-broker:5000]. Required.
+  brokers: []
+  # The name the brokers' client certificate is checked against.
+  serverName: localhost
+  # A Secret holding the PEM certificates to trust for the brokers. Empty
+  # means the public roots.
+  caSecret:
+    name: ""
+    key: ca.crt
+  tenant: relay
+  # Brokers that hold each stream. Above 1, writes wait for a majority.
+  replicas: 1
+
+# Relay tenants, comma-separated, each a Felix namespace.
+tenants: acme
+# Who administers each tenant: tenant=admin,admin separated by spaces, where
+# an admin is a value of oidc.subjectClaim.
+tenantAdmins: ""
+
+# A Secret holding RELAY_SECRET_KEY: 32 random bytes, base64 or hex, that
+# seal every secret the relay stores. Required, and never to be lost.
+secretKey:
+  existingSecret: ""
+  key: secret-key
+
+# The identity provider admins sign in with. Required.
+oidc:
+  issuer: ""
+  clientId: relay-admin
+  # A Secret holding the client secret.
+  clientSecret:
+    existingSecret: ""
+    key: client-secret
+  # Where the relay reaches the provider when browsers reach it at another
+  # address. Empty means the issuer.
+  internalUrl: ""
+  # Where Felix fetches the provider's keys. Empty means its discovery document.
+  jwksUrl: ""
+  subjectClaim: email
+
+# RELAY_* settings every relay process gets, such as RELAY_REPLAY_WINDOW,
+# RELAY_DISABLE_AFTER or RELAY_CLAIM_WAIT_MS. docs/self-hosting.md lists them.
+settings: {}
+
+intake:
+  # Intake holds no state, so any number serve any webhook.
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 80
+  # Senders reach /in/ on this host.
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    tlsSecret: ""
+  resources:
+    requests: {cpu: 100m, memory: 64Mi}
+    limits: {memory: 256Mi}
+  extraEnv: []
+
+deliver:
+  # Each pod's ordinal is its RELAY_WORKER_INDEX, and it delivers the
+  # endpoints whose id hashes to it. Changing the count moves endpoints.
+  replicas: 2
+  resources:
+    requests: {cpu: 100m, memory: 64Mi}
+    limits: {memory: 512Mi}
+  extraEnv: []
+
+admin:
+  replicas: 1
+  # Where browsers reach the admin page, for the sign-in redirect. Empty
+  # means https://<ingress.host>.
+  publicUrl: ""
+  service:
+    type: ClusterIP
+    port: 80
+  # The page, the API and the sign-in on one host. Every request is signed in.
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    # A kubernetes.io/tls Secret for the host. The session cookie is Secure
+    # only over HTTPS.
+    tlsSecret: ""
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+  extraEnv: []
+
+# Seeds Felix at every install and upgrade and keeps the relay's IdP token
+# fresh, signing the relay's service accounts in itself (felix#954). It
+# stores the broker credential and the relay's token in Secrets.
+tokens:
+  # The control plane's bootstrap listener, e.g.
+  # http://felix-controlplane-bootstrap:9095. Required.
+  bootstrapUrl: ""
+  # A Secret holding the bootstrap token. Required.
+  bootstrapSecret:
+    name: ""
+    key: token
+  # The Secret the broker credential goes to, for the felix chart's
+  # broker.credential.existingSecret. Empty means <release>-broker-credential.
+  brokerCredentialSecret: ""

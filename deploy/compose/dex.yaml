@@ -1,0 +1,24 @@
+# The stand-in sign-in for a first run: Dex with one admin, alice@example.com,
+# password "password". Replace it with your own provider before anyone else
+# can reach the relay.
+issuer: http://127.0.0.1:5556/dex
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  skipApprovalScreen: true
+  # Lets scripts get an ID token with a password, no browser.
+  passwordConnector: local
+enablePasswordDB: true
+staticClients:
+  - id: relay-admin
+    name: Felix Webhook Relay
+    secret: dev-admin-secret
+    redirectURIs:
+      - http://127.0.0.1:8090/auth/callback
+staticPasswords:
+  - email: alice@example.com
+    username: alice
+    userID: "1"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"

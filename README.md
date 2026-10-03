@@ -62,20 +62,15 @@ fail without losing what was acknowledged.
 
 ## Quick start
 
-You need Rust (the toolchain is pinned in `rust-toolchain.toml`), Docker and
-`jq`. `dev/up.sh` starts a Felix broker and control plane from the published
-0.6.0-preview images, Dex for admins to sign in with, and a stand-in identity
-provider for the relay's own token. It seeds two relay tenants, `acme` and
-`globex`:
+You need Docker with Compose 2.20 or later. The compose install runs the relay
+with a Felix broker and control plane and nothing else, plus Dex as a stand-in
+sign-in for a first run:
 
 ```bash
-dev/up.sh
-export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
-export RELAY_IDP_TOKEN_FILE="$PWD/dev/state/relay-idp.token"
-export RELAY_OIDC_ISSUER=http://127.0.0.1:5556/dex
-export RELAY_OIDC_CLIENT_ID=relay-admin RELAY_OIDC_CLIENT_SECRET=dev-admin-secret
-export RELAY_SECRET_KEY="$(openssl rand -base64 32)"
-RELAY_TENANTS=acme,globex cargo run -p felix-relay
+git clone --depth 1 https://github.com/gabloe/felix-webhook-relay
+cd felix-webhook-relay/deploy/compose
+sed -i.bak "s|^RELAY_SECRET_KEY=.*|RELAY_SECRET_KEY=$(openssl rand -base64 32)|" .env
+docker compose up -d --wait
 ```
 
 Open <http://127.0.0.1:8090/admin/acme> and sign in as `alice@example.com` with
@@ -83,7 +78,8 @@ the password `password`. The page creates sources and endpoints, shows health,
 lag and counts, and replays, retries, redrives and rotates secrets.
 
 The same actions are a JSON API under `/api/<tenant>/`, which takes an ID token
-as a bearer token. From another shell, create a source and an endpoint:
+as a bearer token. Create a source and an endpoint (the endpoint URL is
+reached from inside the relay's container):
 
 ```bash
 token=$(curl -s -u relay-admin:dev-admin-secret http://127.0.0.1:5556/dex/token \
@@ -91,7 +87,7 @@ token=$(curl -s -u relay-admin:dev-admin-secret http://127.0.0.1:5556/dex/token 
   -d scope='openid email' | jq -r .id_token)
 api() { curl -s -H "authorization: Bearer $token" -H 'content-type: application/json' "$@"; }
 api -X PUT -d '{"scheme": {"type": "token"}}' http://127.0.0.1:8090/api/acme/sources/demo
-api -X PUT -d '{"source": "demo", "url": "http://127.0.0.1:9000/hook"}' \
+api -X PUT -d '{"source": "demo", "url": "https://hooks.example.com/hook"}' \
   http://127.0.0.1:8090/api/acme/endpoints/demo
 ```
 
@@ -103,10 +99,11 @@ curl -i -H 'content-type: application/json' -d '{"hello":"world"}' \
   http://127.0.0.1:8090/in/acme/demo/<token>
 ```
 
-[Configuration](docs/design.md#configuration) lists the signature schemes, the
-endpoint options and every environment variable. Packages for self-hosting
-(images, a compose install and a Helm chart) are coming in
-[M7](https://github.com/gabloe/felix-webhook-relay/milestone/8).
+Before anyone else can reach it, change the tokens in `.env` and sign admins
+in with your own provider. [docs/self-hosting.md](docs/self-hosting.md) covers
+that, the Helm chart, and every setting.
+[Configuration](docs/design.md#configuration) lists the signature schemes and
+the endpoint options.
 
 ## How it works
 
@@ -136,7 +133,7 @@ compares this with other ways of building a webhook relay.
 
 ## Status
 
-Milestones 0 to 6 are merged, and self-hosting (M7) is in progress. Killing
+Milestones 0 to 7 are merged. Killing
 intake, a delivery worker, or any broker of a three-broker cluster under load
 loses nothing that was acknowledged. Measured performance, with its
 conditions, is in [docs/performance.md](docs/performance.md).
@@ -150,11 +147,12 @@ conditions, is in [docs/performance.md](docs/performance.md).
 | [4](https://github.com/gabloe/felix-webhook-relay/milestone/5) | Replay and redrive | Done |
 | [5](https://github.com/gabloe/felix-webhook-relay/milestone/6) | Tenants, narrowed tokens, the admin page | Done |
 | [6](https://github.com/gabloe/felix-webhook-relay/milestone/7) | Crash and failover tests, performance targets | Done |
-| [7](https://github.com/gabloe/felix-webhook-relay/milestone/8) | Images, compose, Helm, a self-hosting guide | In progress |
+| [7](https://github.com/gabloe/felix-webhook-relay/milestone/8) | Images, compose, Helm, a self-hosting guide | Done |
 
 ## Documentation
 
 - [docs/design.md](docs/design.md): the architecture, Felix layout, delivery semantics, replay, signing, multi-tenancy, the admin API and configuration.
+- [docs/self-hosting.md](docs/self-hosting.md): the compose install, the Helm chart, your own identity provider, the broker settings the relay depends on, backups and upgrades.
 - [docs/performance.md](docs/performance.md): measured results for each performance target, with their conditions.
 
 ## Contributing

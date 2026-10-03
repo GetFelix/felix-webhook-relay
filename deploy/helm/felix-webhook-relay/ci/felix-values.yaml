@@ -1,0 +1,70 @@
+# The felix chart, as CI runs it on kind next to this chart: a three-member
+# Raft control plane, which keeps the metadata in its own volumes with no
+# database, and one broker. Install it first with broker.enabled=false, then
+# this chart, then upgrade it with broker.enabled=true and the broker
+# credential the tokens service stored.
+controlplane:
+  replicas: 3
+  storage:
+    backend: raft
+    raft:
+      volume:
+        size: 1Gi
+      peerToken:
+        existingSecret: felix-raft-peer
+  bootstrap:
+    enabled: true
+    existingSecret: felix-bootstrap
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  extraEnv:
+    # The tokens service is plain HTTP inside the cluster.
+    - name: FELIX_CONTROLPLANE_OIDC_ALLOW_INSECURE_HTTP
+      value: "true"
+    # 0.6.0-preview accepts only ES256 unless told otherwise.
+    - name: FELIX_CONTROLPLANE_OIDC_ALLOWED_ALGORITHMS
+      value: ES256,RS256
+    # The broker reads its token once (felix#955).
+    - name: FELIX_EXCHANGE_TOKEN_TTL_SECONDS
+      value: "2592000"
+broker:
+  enabled: false
+  replicas: 1
+  credential:
+    existingSecret: felix-webhook-relay-broker-credential
+  peerTls:
+    allowUnauthenticated: true
+  # One certificate for every broker, naming felix-broker; the relay trusts
+  # its tls.crt.
+  clientTls:
+    enabled: true
+    existingSecret: felix-broker-tls
+  # Discovery drops advertised names that are not IP addresses, so advertise
+  # the pod's IP rather than its DNS name.
+  clientAdvertiseAddr: "$(POD_IP):5000"
+  storage:
+    size: 1Gi
+  podDisruptionBudget:
+    enabled: false
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  extraEnv:
+    # Each source is a stream, and each log reserves a whole segment up front.
+    - name: FELIX_DURABLE_SEGMENT_BYTES
+      value: "16777216"
+    - name: FELIX_DURABLE_FSYNC_MODE
+      value: on_commit
+    - name: FELIX_ACK_ON_COMMIT
+      value: "true"
+    # At least RELAY_DISABLE_AFTER plus RELAY_REPLAY_WINDOW.
+    - name: FELIX_DURABLE_RETENTION_SECONDS
+      value: "1209600"
+    # The writer queue is per connection, one entry per subscription per change.
+    - name: FELIX_SUB_QUEUE_BOUND
+      value: "8192"

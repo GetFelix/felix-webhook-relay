@@ -786,8 +786,9 @@ Every relay process reads these variables.
 | `RELAY_PUBLIC_URL` | `http://<RELAY_LISTEN>` | Where browsers reach the relay, for the sign-in redirect |
 | `RELAY_OIDC_ISSUER` | none; required for `admin` | The IdP admins sign in with |
 | `RELAY_OIDC_CLIENT_ID`, `RELAY_OIDC_CLIENT_SECRET` | none; required for `admin` | The relay's client at that IdP |
+| `RELAY_OIDC_INTERNAL_URL` | the issuer | Where the relay reaches the IdP when it cannot at the issuer's address; replaces the issuer at the start of the discovery and token endpoint URLs |
 | `RELAY_SECRET_KEY` | none, required | 32 bytes, base64 or hex, that seal every secret the relay stores in Felix |
-| `RELAY_FELIX_BROKERS` | `127.0.0.1:5000` | Comma-separated broker addresses |
+| `RELAY_FELIX_BROKERS` | `127.0.0.1:5000` | Comma-separated broker addresses, `host:port`, resolved at each connection |
 | `RELAY_FELIX_SERVER_NAME` | `localhost` | Name the broker certificate is checked against |
 | `RELAY_FELIX_CA_FILE` | platform roots | PEM certificates to trust for the broker |
 | `RELAY_IDP_TOKEN_FILE` | none, required | An ID token for the relay's service principal, read again before each token exchange |
@@ -807,18 +808,25 @@ Every relay process reads these variables.
 
 ## Self-hosting
 
-Mirrors felix-canvas's packaging, in M7:
+Mirrors felix-canvas's packaging. [self-hosting.md](self-hosting.md) is the guide.
 
-- **One image**, `ghcr.io/gabloe/felix-webhook-relay`, multi-arch, built on native runners and signed like Felix's own images. `RELAY_ROLES` picks the roles.
-- **A compose file** with the Felix broker and control plane at a pinned version, the relay in all three roles, and a stand-in IdP for a first run. Felix still needs an IdP to issue any token ([felix#954](https://github.com/gabloe/felix/issues/954)).
-- **A Helm chart** with intake as a Deployment and delivery as a StatefulSet, so the ordinal is `RELAY_WORKER_INDEX`.
-- **A self-hosting guide** listing every variable, the IdP registration, the Felix roles each tenant needs, and the two broker settings the relay depends on: retention longer than the disable window plus the replay window, and `RELAY_CLAIM_WAIT_MS` equal to `FELIX_GROUP_VISIBILITY_TIMEOUT_MS`.
+- **One image**, `ghcr.io/gabloe/felix-webhook-relay`, multi-arch, built on native runners and signed like Felix's own images. `RELAY_ROLES` picks the roles. It also carries `deploy/seed.sh` as `relay-seed`, and the shell tools it needs, so the install pulls no other image of ours.
+- **A compose file** with the Felix broker and control plane at a pinned version, the control plane on its own Raft log rather than a database, the relay in all three roles, Dex as a stand-in for admins to sign in with, and a `tokens` service. Felix still needs an IdP to issue any token ([felix#954](https://github.com/gabloe/felix/issues/954)), so `tokens` is a minimal one for the relay's service accounts: it signs ID tokens with a key it makes, serves the JWKS, seeds Felix, and rewrites the relay's IdP token file before it expires. The relay already reads that file before every exchange, so nothing in the relay knows about it.
+- **A Helm chart** with intake as a Deployment, delivery as a StatefulSet whose `apps.kubernetes.io/pod-index` label is `RELAY_WORKER_INDEX`, admin as a Deployment behind an ingress, and `tokens` writing the broker credential and the relay's IdP token to Secrets.
+- **A self-hosting guide** listing every variable, the IdP registration, the Felix roles each tenant needs, and the broker settings the relay depends on: retention longer than the disable window plus the replay window, `RELAY_CLAIM_WAIT_MS` equal to `FELIX_GROUP_VISIBILITY_TIMEOUT_MS`, and small segments, since every source is a stream that reserves one.
 
-A standalone dev broker reads its node token once, so the dev stack sets
-`FELIX_EXCHANGE_TOKEN_TTL_SECONDS=86400` as felix-canvas does
-([felix#955](https://github.com/gabloe/felix/issues/955)). It also sets
-`FELIX_GROUP_VISIBILITY_TIMEOUT_MS=5000`, so tests see claims lapse while a
-worker retries, and a relay on it can use `RELAY_CLAIM_WAIT_MS=5000`.
+Two things the install needed from the relay itself: broker addresses are
+`host:port` names resolved at each connection, since compose and Kubernetes
+name brokers rather than pin their IPs, and `RELAY_OIDC_INTERNAL_URL` lets
+the relay call an IdP's token endpoint at another address than browsers use,
+as with Dex on the compose network.
+
+A standalone 0.6.0-preview broker reads its node token once, so the dev stack
+sets `FELIX_EXCHANGE_TOKEN_TTL_SECONDS=86400` and the install 30 days, as
+felix-canvas does ([felix#955](https://github.com/gabloe/felix/issues/955)).
+The dev stack also sets `FELIX_GROUP_VISIBILITY_TIMEOUT_MS=5000`, so tests see
+claims lapse while a worker retries, and a relay on it can use
+`RELAY_CLAIM_WAIT_MS=5000`.
 
 ## Risks, and what this surfaces in Felix
 

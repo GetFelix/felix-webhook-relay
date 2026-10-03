@@ -1,0 +1,149 @@
+# Felix Webhook Relay, self-hosted: the Felix control plane and one broker,
+# the relay in all three roles, and the `tokens` service that seeds Felix and
+# signs the relay's own service tokens. Nothing else: no database.
+#
+# Settings live in .env next to this file; docs/self-hosting.md describes
+# each one. Upgrading means replacing this file and keeping .env.
+name: felix-webhook-relay
+
+services:
+  controlplane:
+    image: ghcr.io/gabloe/felix-controlplane:${FELIX_VERSION:-0.6.0-preview}
+    environment:
+      # The metadata lives in the control plane's own Raft log, so there is
+      # no database beside Felix. One member is a group of one.
+      FELIX_CONTROLPLANE_STORAGE_BACKEND: raft
+      FELIX_RAFT_NODE_ID: "1"
+      FELIX_RAFT_PEERS: 1=controlplane:8444
+      FELIX_RAFT_BIND_ADDR: 0.0.0.0:8444
+      FELIX_RAFT_DATA_DIR: /var/lib/felix/raft
+      FELIX_RAFT_CLUSTER_ID: felix-webhook-relay
+      FELIX_RAFT_PEER_TOKEN: ${FELIX_RAFT_PEER_TOKEN:?set FELIX_RAFT_PEER_TOKEN in .env}
+      FELIX_RAFT_INITIAL_CLUSTER_STATE: new
+      # The tokens service initializes the tenant through this listener. It
+      # has no published port, so only containers on this network reach it.
+      FELIX_BOOTSTRAP_ENABLED: "true"
+      FELIX_BOOTSTRAP_BIND_ADDR: 0.0.0.0:9095
+      FELIX_BOOTSTRAP_TOKEN: ${FELIX_BOOTSTRAP_TOKEN:?set FELIX_BOOTSTRAP_TOKEN in .env}
+      # The tokens service is plain HTTP on this network.
+      FELIX_CONTROLPLANE_OIDC_ALLOW_INSECURE_HTTP: "true"
+      # 0.6.0-preview accepts only ES256 unless told otherwise, and most
+      # providers sign with RS256, as the tokens service does.
+      FELIX_CONTROLPLANE_OIDC_ALLOWED_ALGORITHMS: ${FELIX_OIDC_ALGORITHMS:-ES256,RS256}
+      # The broker reads its token once at startup (felix#955), so the token
+      # must outlive the time between restarts.
+      FELIX_EXCHANGE_TOKEN_TTL_SECONDS: ${FELIX_TOKEN_TTL_SECONDS:-2592000}
+      RUST_LOG: ${FELIX_LOG:-info}
+    volumes:
+      - controlplane-data:/var/lib/felix
+    restart: unless-stopped
+
+  # The stand-in sign-in for a first run: Dex with the users in dex.yaml.
+  # Remove "dev-idp" from COMPOSE_PROFILES once your own provider is set.
+  dex:
+    profiles: [dev-idp]
+    image: ghcr.io/dexidp/dex:v2.44.0
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "127.0.0.1:5556:5556"
+    restart: unless-stopped
+
+  # Seeds Felix at every start, makes the broker a certificate on the first,
+  # and keeps the relay's IdP token fresh. Felix issues tokens only in
+  # exchange for an IdP token (felix#954), so this signs the relay's service
+  # accounts in itself. It has no published port.
+  tokens:
+    image: ghcr.io/gabloe/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
+    entrypoint: ["relay-seed", "serve"]
+    # Root, to write the state volume, which Docker creates owned by root.
+    user: "0:0"
+    environment:
+      FELIX_BOOTSTRAP_TOKEN: ${FELIX_BOOTSTRAP_TOKEN}
+      TOKENS_ISSUER: http://tokens:9400
+      IDP_DIR: /run/idp/www
+      IDP_KEY: /run/idp/key.pem
+      BROKER_CERT_SAN: DNS:broker,DNS:localhost
+      RELAY_TENANTS: ${RELAY_TENANTS}
+      RELAY_TENANT_ADMINS: ${RELAY_TENANT_ADMINS}
+      RELAY_STREAM_REPLICAS: "1"
+      RELAY_OIDC_ISSUER: ${RELAY_OIDC_ISSUER}
+      RELAY_OIDC_JWKS_URL: ${RELAY_OIDC_JWKS_URL:-}
+      RELAY_OIDC_CLIENT_ID: ${RELAY_OIDC_CLIENT_ID}
+      RELAY_OIDC_SUBJECT_CLAIM: ${RELAY_OIDC_SUBJECT_CLAIM:-email}
+    volumes:
+      - state:/state
+    healthcheck:
+      test: ["CMD", "test", "-f", "/state/seeded"]
+      interval: 2s
+      retries: 60
+    depends_on:
+      controlplane:
+        condition: service_healthy
+    restart: unless-stopped
+
+  broker:
+    image: ghcr.io/gabloe/felix-broker:${FELIX_VERSION:-0.6.0-preview}
+    environment:
+      FELIX_CONTROLPLANE_URL: http://controlplane:8443
+      FELIX_NODE_TOKEN_FILE: /state/node.token
+      FELIX_DURABLE_STORAGE_DIR: /var/lib/felix
+      FELIX_TLS_CERT: /state/broker-cert.pem
+      FELIX_TLS_KEY: /state/broker-key.pem
+      FELIX_QUIC_LISTENERS: "1"
+      # Every source is a stream, and every log reserves a whole segment on
+      # disk up front; Felix's default is 256 MiB.
+      FELIX_DURABLE_SEGMENT_BYTES: ${FELIX_SEGMENT_BYTES:-16777216}
+      # An acknowledged webhook is on the device. Group commit keeps it cheap.
+      FELIX_DURABLE_FSYNC_MODE: on_commit
+      FELIX_ACK_ON_COMMIT: "true"
+      # How long records are kept: at least RELAY_DISABLE_AFTER plus
+      # RELAY_REPLAY_WINDOW, or outages and replays lose webhooks.
+      FELIX_DURABLE_RETENTION_SECONDS: ${FELIX_RETENTION_SECONDS:-1209600}
+      # A claim lapses after this; the relay waits as long (RELAY_CLAIM_WAIT_MS)
+      # before a restarted worker's first poll.
+      FELIX_GROUP_VISIBILITY_TIMEOUT_MS: "30000"
+      # The writer queue is per connection, one entry per subscription for
+      # each change, and the relay holds many subscriptions per connection.
+      FELIX_SUB_QUEUE_BOUND: "8192"
+      RUST_LOG: ${FELIX_LOG:-info}
+    volumes:
+      - felix-data:/var/lib/felix
+      - state:/state:ro
+    depends_on:
+      tokens:
+        condition: service_healthy
+    restart: unless-stopped
+
+  relay:
+    image: ghcr.io/gabloe/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
+    environment:
+      RELAY_SECRET_KEY: ${RELAY_SECRET_KEY:?set RELAY_SECRET_KEY in .env}
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL}
+      RELAY_TENANTS: ${RELAY_TENANTS}
+      RELAY_FELIX_BROKERS: broker:5000
+      RELAY_FELIX_SERVER_NAME: broker
+      RELAY_FELIX_CA_FILE: /state/broker-cert.pem
+      RELAY_FELIX_CONTROL_PLANE: http://controlplane:8443
+      RELAY_IDP_TOKEN_FILE: /state/relay-idp.token
+      RELAY_OIDC_ISSUER: ${RELAY_OIDC_ISSUER}
+      RELAY_OIDC_INTERNAL_URL: ${RELAY_OIDC_INTERNAL_URL:-}
+      RELAY_OIDC_CLIENT_ID: ${RELAY_OIDC_CLIENT_ID}
+      RELAY_OIDC_CLIENT_SECRET: ${RELAY_OIDC_CLIENT_SECRET}
+      RELAY_REPLAY_WINDOW: ${RELAY_REPLAY_WINDOW:-7d}
+      RELAY_DISABLE_AFTER: ${RELAY_DISABLE_AFTER:-72h}
+      RUST_LOG: ${RELAY_LOG:-info}
+    ports:
+      - "${RELAY_BIND:-127.0.0.1}:${RELAY_PORT:-8090}:8090"
+    volumes:
+      - state:/state:ro
+    depends_on:
+      broker:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  controlplane-data:
+  felix-data:
+  state:

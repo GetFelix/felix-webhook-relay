@@ -1,0 +1,17 @@
+{{- $a := .Values.admin -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "relay.fullname" . }}-admin
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admin
+spec:
+  replicas: {{ $a.replicas }}
+  selector:
+    matchLabels:
+      {{- include "relay.selector" (list . "admin") | nindent 6 }}
+  template:
+    {{- include "relay.pod" (list . "admin" $a (include "relay.adminEnv" .)) | nindent 4 }}
+---
+{{ include "relay.expose" (list . "admin" $a "/") }}

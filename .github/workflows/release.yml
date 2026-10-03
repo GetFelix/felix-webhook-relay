@@ -1,0 +1,195 @@
+name: Release
+
+# A v* tag publishes a release: the image, pushed and signed once; the Helm
+# chart, attached and pushed as a signed OCI chart; a compose bundle with the
+# image tag pinned; and a GitHub release with that version's CHANGELOG.md
+# section as its notes. Run by hand with `dry_run`, it builds and checks all
+# of it and publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag, such as v0.1.0. Need not exist for a dry run
+        required: true
+        type: string
+      dry_run:
+        description: Build and check everything, publish nothing
+        type: boolean
+        default: false
+      ref:
+        description: Branch or commit to build instead of the tag. Dry runs only
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  # `ref` only ever applies to a dry run; `check` refuses it otherwise, so
+  # nothing is published from a commit that is not the tag.
+  SOURCE_REF: ${{ inputs.ref || inputs.tag || github.ref_name }}
+  DRY_RUN: ${{ inputs.dry_run == true }}
+  CHART_REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  check:
+    name: Versions and notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      ref: ${{ env.SOURCE_REF }}
+    steps:
+      - name: A ref other than the tag is only for a dry run
+        if: ${{ inputs.ref != '' && !inputs.dry_run }}
+        run: |
+          echo "::error::ref without dry_run would publish ${TAG} from a commit that is not the tag"
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Version
+        id: version
+        run: |
+          case "$TAG" in
+            v[0-9]*) echo "version=${TAG#v}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::${TAG} is not a v<version> tag"; exit 1 ;;
+          esac
+
+      # Before anything is published, because after that the tag is permanent.
+      - name: The tag matches every version in the tree, and CHANGELOG.md has its notes
+        run: scripts/release-notes.sh "$TAG" > release-notes.md && cat release-notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  image:
+    name: Image
+    needs: check
+    uses: ./.github/workflows/images.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      push: ${{ inputs.dry_run != true }}
+      ref: ${{ needs.check.outputs.ref }}
+      version: ${{ needs.check.outputs.version }}
+
+  chart:
+    name: Helm chart
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.ref }}
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package
+        run: |
+          helm lint deploy/helm/felix-webhook-relay -f deploy/helm/felix-webhook-relay/ci/kind-values.yaml
+          helm package deploy/helm/felix-webhook-relay --destination dist
+
+      - uses: sigstore/cosign-installer@v3
+        if: env.DRY_RUN != 'true'
+
+      # By digest, as with the image, so moving a tag cannot carry the signature.
+      - name: Push and sign
+        if: env.DRY_RUN != 'true'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          echo "$TOKEN" | cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm push "dist/felix-webhook-relay-${VERSION}.tgz" "$CHART_REGISTRY" | tee push.log
+          digest=$(sed -n 's/^Digest: //p' push.log)
+          cosign sign --yes "${CHART_REGISTRY#oci://}/felix-webhook-relay@${digest}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chart
+          path: dist/*.tgz
+
+  compose:
+    name: Compose bundle
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.ref }}
+
+      # The image tag written in rather than defaulted, so a stray
+      # RELAY_VERSION in the environment cannot swap the release's image.
+      - name: Bundle
+        run: |
+          root="felix-webhook-relay-compose-${VERSION}"
+          mkdir -p "dist/${root}"
+          cp deploy/compose/docker-compose.yml deploy/compose/.env deploy/compose/dex.yaml "dist/${root}/"
+          sed -i "s|felix-webhook-relay:\${RELAY_VERSION:-${VERSION}}|felix-webhook-relay:${VERSION}|" \
+            "dist/${root}/docker-compose.yml"
+          if grep -n 'RELAY_VERSION' "dist/${root}/docker-compose.yml"; then exit 1; fi
+          tar -C dist -czf "dist/${root}.tar.gz" "${root}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compose
+          path: dist/*.tar.gz
+
+  release:
+    name: GitHub release
+    needs: [check, image, chart, compose]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "{release-notes,chart,compose}"
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tgz *.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish
+        if: env.DRY_RUN != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Felix Webhook Relay ${{ env.TAG }}
+          prerelease: ${{ contains(env.TAG, '-') }}
+          body_path: dist/release-notes.md
+          files: |
+            dist/*.tgz
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: What a release would hold
+        if: env.DRY_RUN == 'true'
+        run: ls -la dist && cat dist/release-notes.md

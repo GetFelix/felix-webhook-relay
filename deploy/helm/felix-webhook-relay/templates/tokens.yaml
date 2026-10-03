@@ -1,0 +1,151 @@
+{{- $fullname := include "relay.fullname" . -}}
+{{- $name := printf "%s-tokens" $fullname -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+---
+# Creating a Secret cannot be limited to a name; reading and replacing can.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - {{ include "relay.brokerSecret" . }}
+      - {{ include "relay.tokenSecret" . }}
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tokens
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "relay.selector" (list . "tokens") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "relay.selector" (list . "tokens") | nindent 8 }}
+      annotations:
+        # A new pod per revision, so every upgrade seeds again and picks up
+        # new tenants and admins.
+        felix-webhook-relay/revision: {{ .Release.Revision | quote }}
+    spec:
+      serviceAccountName: {{ $name }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: tokens
+          image: {{ include "relay.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["relay-seed", "serve"]
+          securityContext:
+            {{- include "relay.securityContext" . | nindent 12 }}
+          env:
+            - name: FELIX_CONTROL_PLANE
+              value: {{ required "felix.controlPlaneUrl is required" .Values.felix.controlPlaneUrl | quote }}
+            - name: FELIX_BOOTSTRAP_URL
+              value: {{ required "tokens.bootstrapUrl is required" .Values.tokens.bootstrapUrl | quote }}
+            - name: FELIX_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "tokens.bootstrapSecret.name is required" .Values.tokens.bootstrapSecret.name }}
+                  key: {{ .Values.tokens.bootstrapSecret.key }}
+            - name: TOKENS_ISSUER
+              value: http://{{ $name }}:9400
+            - name: STATE_DIR
+              value: /state
+            - name: IDP_DIR
+              value: /run/idp/www
+            - name: IDP_KEY
+              value: /run/idp/key.pem
+            - name: RELAY_FELIX_TENANT
+              value: {{ .Values.felix.tenant | quote }}
+            - name: RELAY_TENANTS
+              value: {{ .Values.tenants | quote }}
+            - name: RELAY_TENANT_ADMINS
+              value: {{ .Values.tenantAdmins | quote }}
+            - name: RELAY_STREAM_REPLICAS
+              value: {{ .Values.felix.replicas | quote }}
+            - name: RELAY_OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: RELAY_OIDC_JWKS_URL
+              value: {{ .Values.oidc.jwksUrl | quote }}
+            - name: RELAY_OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            - name: RELAY_OIDC_SUBJECT_CLAIM
+              value: {{ .Values.oidc.subjectClaim | quote }}
+            - name: NODE_TOKEN_SECRET
+              value: {{ include "relay.brokerSecret" . }}
+            - name: RELAY_TOKEN_SECRET
+              value: {{ include "relay.tokenSecret" . }}
+          ports:
+            - name: http
+              containerPort: 9400
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/state/seeded"]
+            periodSeconds: 3
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - {name: state, mountPath: /state}
+            - {name: idp, mountPath: /run/idp}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: state, emptyDir: {}}
+        - {name: idp, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+# The control plane fetches the service accounts' keys here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tokens
+spec:
+  # The pod is ready once it has seeded, and seeding needs the control plane
+  # to fetch these keys first.
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: 9400
+      targetPort: http
+  selector:
+    {{- include "relay.selector" (list . "tokens") | nindent 4 }}

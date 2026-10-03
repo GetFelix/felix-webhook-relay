@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "relay.fullname" . }}-intake
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+spec:
+  replicas: {{ .Values.intake.replicas }}
+  selector:
+    matchLabels:
+      {{- include "relay.selector" (list . "intake") | nindent 6 }}
+  template:
+    {{- include "relay.pod" (list . "intake" .Values.intake "") | nindent 4 }}
+---
+{{ include "relay.expose" (list . "intake" .Values.intake "/in/") }}

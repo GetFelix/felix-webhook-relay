@@ -1,0 +1,10 @@
+Felix Webhook Relay is starting. The tokens Deployment writes the broker
+credential to the Secret {{ include "relay.brokerSecret" . }}; on a first
+install, enable the Felix brokers with it:
+
+  helm upgrade <felix release> <felix chart> --reuse-values \
+    --set broker.enabled=true \
+    --set broker.credential.existingSecret={{ include "relay.brokerSecret" . }}
+
+Senders post to the Service {{ include "relay.fullname" . }}-intake at /in/<tenant>/<source>,
+and admins sign in on the Service {{ include "relay.fullname" . }}-admin.

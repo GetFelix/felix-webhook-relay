@@ -40,6 +40,10 @@ pub(crate) struct Oidc {
     pub(crate) issuer: String,
     pub(crate) client_id: String,
     pub(crate) client_secret: String,
+    /// Where this process reaches the IdP when browsers reach it at the
+    /// issuer's address and this process cannot, as with a provider on
+    /// another container's loopback.
+    pub(crate) internal_url: Option<String>,
 }
 
 /// Relay settings. The defaults match the development stack in `dev/`.
@@ -50,8 +54,9 @@ pub(crate) struct Config {
     /// `RELAY_ROLES`: any of `intake`, `deliver`, `admin`, comma-separated.
     /// Default all three.
     pub(crate) roles: Roles,
-    /// `RELAY_FELIX_BROKERS`: comma-separated broker addresses. Default `127.0.0.1:5000`.
-    pub(crate) brokers: Vec<SocketAddr>,
+    /// `RELAY_FELIX_BROKERS`: comma-separated broker addresses, `host:port`,
+    /// resolved at each connection. Default `127.0.0.1:5000`.
+    pub(crate) brokers: Vec<String>,
     /// `RELAY_FELIX_SERVER_NAME`: the name the broker's certificate is checked
     /// against. Default `localhost`, what a development broker's certificate names.
     pub(crate) server_name: String,
@@ -65,8 +70,9 @@ pub(crate) struct Config {
     /// `RELAY_FELIX_CONTROL_PLANE`: where tokens are exchanged and streams
     /// created. Default `http://127.0.0.1:8443`.
     pub(crate) control_plane: String,
-    /// `RELAY_OIDC_ISSUER`, `RELAY_OIDC_CLIENT_ID`, `RELAY_OIDC_CLIENT_SECRET`:
-    /// how admins sign in. Required for the admin role.
+    /// `RELAY_OIDC_ISSUER`, `RELAY_OIDC_CLIENT_ID`, `RELAY_OIDC_CLIENT_SECRET`
+    /// and optionally `RELAY_OIDC_INTERNAL_URL`: how admins sign in. Required
+    /// for the admin role.
     pub(crate) oidc: Option<Oidc>,
     /// `RELAY_REPLAY_WINDOW`: how far back replays should reach. With
     /// `RELAY_DISABLE_AFTER`, the retention the relay needs from the broker.
@@ -152,6 +158,8 @@ impl Config {
                     .context("RELAY_OIDC_CLIENT_ID is required")?,
                 client_secret: var("RELAY_OIDC_CLIENT_SECRET")
                     .context("RELAY_OIDC_CLIENT_SECRET is required")?,
+                internal_url: var("RELAY_OIDC_INTERNAL_URL")
+                    .map(|url| url.trim_end_matches('/').to_string()),
             }),
             None if roles.admin => bail!("the admin role needs RELAY_OIDC_ISSUER for sign-in"),
             None => None,
@@ -161,9 +169,9 @@ impl Config {
             roles,
             brokers: or("RELAY_FELIX_BROKERS", "127.0.0.1:5000")
                 .split(',')
-                .map(|addr| addr.trim().parse())
-                .collect::<Result<_, _>>()
-                .context("parse RELAY_FELIX_BROKERS")?,
+                .map(|addr| addr.trim().to_string())
+                .filter(|addr| !addr.is_empty())
+                .collect(),
             server_name: or("RELAY_FELIX_SERVER_NAME", "localhost"),
             ca_file: var("RELAY_FELIX_CA_FILE").map(PathBuf::from),
             idp_token_file: var("RELAY_IDP_TOKEN_FILE")

@@ -371,7 +371,15 @@ async fn open(config: &Config, tokens: Arc<dyn TokenProvider>) -> Result<Cluster
     let mut client_config = ClientConfig::optimized_defaults(quic);
     client_config.auth_tenant_id = Some(config.felix_tenant.clone());
     client_config.token_provider = Some(tokens);
-    ClusterClient::connect(&config.brokers, &config.server_name, client_config)
+    let mut brokers = Vec::new();
+    for broker in &config.brokers {
+        brokers.extend(
+            tokio::net::lookup_host(broker.as_str())
+                .await
+                .with_context(|| format!("resolve broker {broker}"))?,
+        );
+    }
+    ClusterClient::connect(&brokers, &config.server_name, client_config)
         .await
         .context("connect to Felix")
 }
