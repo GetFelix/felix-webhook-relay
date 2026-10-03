@@ -82,6 +82,13 @@ jobs:
           export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
           export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
           cargo test --locked --test outage -- --include-ignored an_endpoint_that_was_down
+      - name: Slow endpoint isolation, 1,000 webhooks
+        env:
+          RELAY_TEST_ISOLATION_WEBHOOKS: "1000"
+        run: |
+          export RELAY_FELIX_CA_FILE="$PWD/dev/state/broker-cert.pem"
+          export RELAY_FELIX_TOKEN_FILE="$PWD/dev/state/relay.token"
+          cargo test --locked --test endpoints -- --include-ignored --nocapture a_slow_endpoint
       - name: Felix logs
         if: failure()
         run: docker compose -f dev/docker-compose.yml logs

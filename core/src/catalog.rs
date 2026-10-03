@@ -49,10 +49,68 @@ pub struct Endpoint {
     /// The secret before the last rotation, which also signs until `until`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_secret: Option<PreviousSecret>,
+    #[serde(default)]
+    pub mode: Mode,
+    /// Requests in flight at once for an unordered endpoint.
+    #[serde(default = "default_window")]
+    pub window: u32,
+    /// The event types it receives; empty means all of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_types: Vec<String>,
+    /// Records below this offset are acknowledged without being sent. Set to
+    /// the source's tail when the endpoint is created, because a new Felix
+    /// group starts at the beginning of the log; zero backfills.
+    #[serde(default)]
+    pub start_offset: u64,
     /// Set by the endpoint's worker when it gives up on the endpoint, and
     /// cleared by an operator. Its records wait in the log meanwhile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<Disabled>,
+}
+
+/// Whether an endpoint gets its webhooks in intake order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// One request at a time, in intake order.
+    #[default]
+    Ordered,
+    /// Up to `window` requests at a time, in no particular order.
+    Unordered,
+}
+
+pub const DEFAULT_WINDOW: u32 = 16;
+
+fn default_window() -> u32 {
+    DEFAULT_WINDOW
+}
+
+impl Endpoint {
+    /// Whether the record at `offset` with this event type is sent at all.
+    pub fn wants(&self, offset: u64, event_type: Option<&str>) -> bool {
+        offset >= self.start_offset
+            && (self.event_types.is_empty()
+                || event_type.is_some_and(|t| self.event_types.iter().any(|want| want == t)))
+    }
+
+    /// Requests it may have in flight at once.
+    pub fn in_flight(&self) -> u32 {
+        match self.mode {
+            Mode::Ordered => 1,
+            Mode::Unordered => self.window.max(1),
+        }
+    }
+}
+
+/// Which of `count` delivery processes owns an endpoint. FNV-1a, so every
+/// process agrees without talking to the others.
+pub fn owner(endpoint: &str, count: u32) -> u32 {
+    let hash = endpoint
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    (hash % u64::from(count.max(1))) as u32
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +211,47 @@ mod tests {
             Some(EventIdFrom::Header("x-github-delivery".to_string()))
         );
         assert!(source.keep_headers.is_empty());
+    }
+
+    fn endpoint() -> Endpoint {
+        serde_json::from_str(r#"{"source":"s","url":"http://e","secret":"x"}"#).unwrap()
+    }
+
+    #[test]
+    fn endpoints_default_to_ordered_from_the_start() {
+        let endpoint = endpoint();
+        assert_eq!(endpoint.mode, Mode::Ordered);
+        assert_eq!(endpoint.in_flight(), 1);
+        assert_eq!(endpoint.window, DEFAULT_WINDOW);
+        assert!(endpoint.wants(0, None));
+    }
+
+    #[test]
+    fn filters_and_start_offsets_pick_records() {
+        let mut endpoint = endpoint();
+        endpoint.start_offset = 10;
+        endpoint.event_types = vec!["invoice.paid".to_string()];
+        assert!(endpoint.wants(10, Some("invoice.paid")));
+        assert!(!endpoint.wants(9, Some("invoice.paid")));
+        assert!(!endpoint.wants(10, Some("invoice.created")));
+        assert!(!endpoint.wants(10, None));
+        endpoint.mode = Mode::Unordered;
+        assert_eq!(endpoint.in_flight(), 16);
+    }
+
+    #[test]
+    fn owners_split_endpoints_evenly_and_agree() {
+        let mut counts = [0; 4];
+        for n in 0..1000 {
+            counts[owner(&format!("ep-{n}"), 4) as usize] += 1;
+        }
+        assert!(
+            counts.iter().all(|&c| (200..300).contains(&c)),
+            "{counts:?}"
+        );
+        assert_eq!(owner("billing", 3), owner("billing", 3));
+        assert_eq!(owner("billing", 1), 0);
+        assert_eq!(owner("billing", 0), 0);
     }
 
     #[test]

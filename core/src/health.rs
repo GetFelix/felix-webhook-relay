@@ -118,12 +118,60 @@ impl Default for Health {
 }
 
 impl Health {
-    /// Fold in one attempt at `now` (Unix milliseconds). `jitter` is a
-    /// random number in `[0, 1)`.
+    /// Fold in one attempt at the record at the head of an ordered endpoint,
+    /// at `now` (Unix milliseconds). `jitter` is a random number in `[0, 1)`.
     pub fn decide(&mut self, outcome: Outcome, now: u64, jitter: f64, policy: &Policy) -> Decision {
+        let mut refusals = self.refusals;
+        let decision = self.decide_for(outcome, &mut refusals, now, jitter, policy);
+        self.refusals = refusals;
+        decision
+    }
+
+    /// Fold in one round of an unordered endpoint's window: one outcome per
+    /// record still in hand, with each record's refusals so far.
+    ///
+    /// When some records got through, an unwell answer to another says that
+    /// record is the problem, not the endpoint, so it counts as a refusal and
+    /// the rest of the window carries on. It keeps counting that way once it
+    /// is the only one left. When none got through, the endpoint pauses as a
+    /// whole, and the pause counts once, not once per record.
+    pub fn decide_window(
+        &mut self,
+        outcomes: &[Outcome],
+        refusals: &mut [usize],
+        now: u64,
+        jitter: f64,
+        policy: &Policy,
+    ) -> Vec<Decision> {
+        let delivered = outcomes.contains(&Outcome::Delivered);
+        let mut pause = None;
+        outcomes
+            .iter()
+            .zip(refusals.iter_mut())
+            .map(|(outcome, refusals)| match outcome {
+                Outcome::Unwell { .. } if delivered || *refusals > 0 => {
+                    self.decide_for(Outcome::Refused, refusals, now, jitter, policy)
+                }
+                Outcome::Unwell { .. } => pause
+                    .get_or_insert_with(|| self.decide_for(*outcome, refusals, now, jitter, policy))
+                    .clone(),
+                _ => self.decide_for(*outcome, refusals, now, jitter, policy),
+            })
+            .collect()
+    }
+
+    fn decide_for(
+        &mut self,
+        outcome: Outcome,
+        refusals: &mut usize,
+        now: u64,
+        jitter: f64,
+        policy: &Policy,
+    ) -> Decision {
         match outcome {
             Outcome::Delivered => {
                 *self = Self::default();
+                *refusals = 0;
                 Decision::Ack
             }
             Outcome::Refused => {
@@ -131,13 +179,13 @@ impl Health {
                 self.state = State::Active;
                 self.failing_since = None;
                 self.probes = 0;
-                match policy.refused_retries.get(self.refusals) {
+                match policy.refused_retries.get(*refusals) {
                     Some(wait) => {
-                        self.refusals += 1;
+                        *refusals += 1;
                         Decision::Retry(*wait)
                     }
                     None => {
-                        self.refusals = 0;
+                        *refusals = 0;
                         Decision::DeadLetter
                     }
                 }

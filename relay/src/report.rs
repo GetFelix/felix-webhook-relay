@@ -2,7 +2,7 @@
 //! its delivery task and written to Felix every few seconds, or at once when
 //! the endpoint's state changes.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use felix_relay_core::health::State;
@@ -36,14 +36,17 @@ impl Reporter {
             updated_at: unix_millis(),
         }));
         let now = Arc::new(Notify::new());
-        let this = Self { report, now };
-        let writer = this.clone();
+        // The writer holds the report weakly, so it stops once the task that
+        // owns this reporter is gone.
+        let weak: Weak<Mutex<HealthReport>> = Arc::downgrade(&report);
+        let wake = Arc::clone(&now);
         let key = format!("health/{endpoint}");
         tokio::spawn(async move {
             loop {
-                let _ = tokio::time::timeout(EVERY, writer.now.notified()).await;
+                let _ = tokio::time::timeout(EVERY, wake.notified()).await;
+                let Some(report) = weak.upgrade() else { return };
                 let json = {
-                    let mut report = writer.report.lock().unwrap();
+                    let mut report = report.lock().unwrap();
                     report.updated_at = unix_millis();
                     serde_json::to_vec(&*report).expect("a report serializes")
                 };
@@ -52,7 +55,7 @@ impl Reporter {
                 }
             }
         });
-        this
+        Self { report, now }
     }
 
     /// Change the report; `urgent` writes it now rather than on the timer.

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
 use felix_client::{ClientConfig, ClusterClient, StartPosition};
 use rustls::RootCertStore;
@@ -77,6 +77,12 @@ impl Relay {
 
     /// Like [`Relay::start`], with its log written to `log`.
     pub async fn start_logging(roles: &str, env: &[(&str, &str)], log: Stdio) -> Self {
+        // Tests share one tenant, so a delivery process must keep to its own
+        // test's endpoints.
+        assert!(
+            !roles.contains("deliver") || env.iter().any(|(n, _)| *n == "RELAY_ENDPOINT_PREFIXES"),
+            "a delivery process in a test needs RELAY_ENDPOINT_PREFIXES"
+        );
         let addr = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -185,6 +191,8 @@ pub struct Received {
     pub body: Bytes,
     /// What the endpoint answered.
     pub status: StatusCode,
+    pub uri: Uri,
+    pub at: Instant,
 }
 
 impl Received {
@@ -227,6 +235,7 @@ impl Endpoint {
         type Shared = (Arc<Mutex<Vec<Received>>>, Reply, Duration);
         async fn receive(
             State((inbox, reply, delay)): State<Shared>,
+            uri: Uri,
             headers: HeaderMap,
             body: Bytes,
         ) -> StatusCode {
@@ -236,6 +245,8 @@ impl Endpoint {
                     headers,
                     body,
                     status: StatusCode::OK,
+                    uri,
+                    at: Instant::now(),
                 };
                 received.status = reply(inbox.len(), &received);
                 inbox.push(received.clone());

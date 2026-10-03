@@ -14,16 +14,19 @@ durably before answering. It delivers each one to its endpoints, signed, with
 retries and backoff. It sets aside what an endpoint keeps refusing, and it can
 replay any endpoint over a time range after an outage.
 
-**Status: M2 done.** Sources and endpoints live in Felix, written through
+**Status: M3 done.** Sources and endpoints live in Felix, written through
 the admin API with their secrets sealed. Intake verifies Standard Webhooks,
 GitHub, Stripe and generic HMAC signatures before anything is stored, and
 dedupes retries on the sender's event id. Deliveries are signed with
-Standard Webhooks and go to one endpoint per delivery process, in order. An
+Standard Webhooks. A delivery process runs every endpoint in config that
+hashes to its index, each as its own task, ordered or with a window of
+concurrent requests, filtered by event type, and starting at the source's
+tail unless it backfills. An
 endpoint that is down pauses and probes on a backoff schedule while its
 backlog waits in the log, a record it keeps refusing goes to the `dead`
 stream, and an endpoint that answers `410` or fails for three days is
-disabled until an operator enables it. Many endpoints, replay and the admin
-page are still to come.
+disabled until an operator enables it. Replay and the admin page are still
+to come.
 The design and the plan are in [docs/design.md](docs/design.md).
 
 ## Why it exists
@@ -98,7 +101,10 @@ curl -s -X PUT -H 'content-type: application/json' \
   http://127.0.0.1:8090/api/acme/endpoints/demo
 ```
 
-The endpoint's answer holds its `whsec_` signing secret. Send a webhook to
+The endpoint's answer holds its `whsec_` signing secret. An endpoint also
+takes `"mode": "unordered"` with a `"window"` (default 16) of requests in
+flight, `"event_types"` to receive only some, and `"backfill": true` to start
+from the beginning of the source's log instead of its tail. Send a webhook to
 `/in/acme/demo/<token>`, and it arrives at the endpoint URL signed with
 Standard Webhooks headers:
 
@@ -148,7 +154,9 @@ cargo test -- --include-ignored
 | `RELAY_FELIX_TOKEN_FILE` | none, required | Felix token |
 | `RELAY_FELIX_TENANT` | `relay` | The Felix tenant of the deployment |
 | `RELAY_TENANT` | `acme` | The relay tenant, which is a Felix namespace |
-| `RELAY_ENDPOINT` | `demo` | The endpoint this process delivers to; its consumer group is `ep.<id>` |
+| `RELAY_WORKER_INDEX` | `0` | This delivery process's index; it owns the endpoints whose id hashes to it |
+| `RELAY_WORKER_COUNT` | `1` | How many delivery processes share the endpoints |
+| `RELAY_ENDPOINT_PREFIXES` | all | Comma-separated; only endpoints whose ids start with one of these |
 | `RELAY_CLAIM_WAIT_MS` | `30000` | Wait before the first poll; at least the broker's `FELIX_GROUP_VISIBILITY_TIMEOUT_MS` (5000 on the dev stack) |
 | `RELAY_BACKOFF` | `5s,15s,1m,2m,5m` | Waits between probes of a paused endpoint; the last repeats |
 | `RELAY_REFUSED_RETRIES` | `5s,30s` | Waits before each retry of a refused record, then it is dead-lettered |
@@ -171,7 +179,7 @@ cache under `health/<endpoint>`.
 | 0 | One source, one endpoint, through Felix | A webhook goes in and comes out | Done |
 | 1 | Signatures in and out, idempotency keys | Senders are verified, deliveries verify with standard libraries | Done |
 | 2 | Retries, pausing, backoff, dead letters | An endpoint down for an hour gets everything back in order | Done |
-| 3 | Many sources and endpoints, ordered and unordered | One slow endpoint does not delay the others | |
+| 3 | Many sources and endpoints, ordered and unordered | One slow endpoint does not delay the others | Done |
 | 4 | Replay and redrive | Any endpoint replays a time range from the log | |
 | 5 | Tenants, narrowed tokens, the admin page | Tenant isolation enforced by the broker | |
 | 6 | Crash and failover tests, performance targets | Nothing acknowledged is lost | |
