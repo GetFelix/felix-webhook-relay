@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use common::{
-    Endpoint, Received, Relay, TENANT, eventually, metric, read_stream, state_entry, unique,
+    Endpoint, Received, Relay, TENANT, eventually, metric, read_stream, state_entry, unique, within,
 };
 use felix_relay_core::health::{parse_duration, parse_durations};
 use felix_relay_core::records::{Attempt, DeadLetter};
@@ -122,20 +122,18 @@ async fn an_endpoint_that_was_down_gets_everything_in_order() {
     );
 
     down.store(false, Ordering::SeqCst);
-    let back = Instant::now();
-    let first = eventually("the first delivery after the outage", async || {
+    // Within one backoff interval of coming back, plus its jitter.
+    let limit = longest_wait.mul_f64(1.2) + Duration::from_secs(1);
+    within(limit, "the first delivery after the outage", async || {
         endpoint
             .received()
             .iter()
             .any(|r| r.status.is_success())
-            .then(|| back.elapsed())
+            .then_some(())
     })
     .await;
-    assert!(
-        first <= longest_wait.mul_f64(1.2) + Duration::from_secs(1),
-        "the endpoint got its first webhook {first:?} after it came back"
-    );
-    let all = eventually("every webhook delivered", async || {
+    let drain = Duration::from_secs(60) + Duration::from_millis(webhooks as u64 * 20);
+    let all = within(drain, "every webhook delivered", async || {
         let received = endpoint.received();
         (delivered(&received).len() >= webhooks).then_some(received)
     })

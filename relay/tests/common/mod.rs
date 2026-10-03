@@ -43,13 +43,22 @@ pub fn now_secs() -> u64 {
 }
 
 /// Poll `check` until it returns something, or fail after [`WAIT`].
-pub async fn eventually<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
+pub async fn eventually<T>(what: &str, check: impl AsyncFnMut() -> Option<T>) -> T {
+    within(WAIT, what, check).await
+}
+
+/// Poll `check` until it returns something, or fail after `limit`.
+pub async fn within<T>(
+    limit: Duration,
+    what: &str,
+    mut check: impl AsyncFnMut() -> Option<T>,
+) -> T {
     let started = Instant::now();
     loop {
         if let Some(value) = check().await {
             return value;
         }
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
+        assert!(started.elapsed() < limit, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
