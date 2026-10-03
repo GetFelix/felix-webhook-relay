@@ -223,7 +223,9 @@ A retained prefix watch reads one shard, so the cache has one.
 **Secrets are encrypted by the relay.** Felix is not a secret store. Source
 verification secrets and endpoint signing secrets are sealed with
 XChaCha20-Poly1305 under `RELAY_SECRET_KEY` before they go into `config`, so a
-cache read without that key yields nothing usable.
+cache read without that key yields nothing usable. The entry's cache key is
+bound in as associated data, so a sealed secret copied into another entry
+does not open. The relay refuses to start without the key.
 
 ### The envelope
 
@@ -266,7 +268,7 @@ sequenceDiagram
 ```
 
 1. **Verify before anything is written.** The source names its scheme and secret. A bad signature or a timestamp outside five minutes is a `401`, and nothing reaches the log.
-2. **Check the idempotency key**, when the source has one. A hit answers `200` with the original offset and appends nothing.
+2. **Check the idempotency key**, when the source has one. The key is the sender's event id, so a source has one when its config says where the sender puts it (`event_id`, a header or a JSON path). A hit answers `200` with the original offset and appends nothing. Senders that retry reuse their id, which is exactly what the key needs.
 3. **Append with an idempotent producer.** Felix's idempotent producer numbers each batch, so intake's own retry of a publish whose ack was lost lands once, across a failover (`crates/sdk/felix-client/src/publish/idempotent.rs`; `docs/semantics.md`, "Idempotent producers"). It also returns the offset on every ack, so the relay does not need the broker-wide `FELIX_ACK_ON_COMMIT` ([felix#956](https://github.com/gabloe/felix/issues/956)).
 4. **Answer `202` only after the ack.** The ack is as durable as the broker's fsync policy (`docs/durable-storage.md`). The self-hosting guide recommends `FsyncMode::OnCommit`, where an ack means the bytes are on the device; group commit is what keeps that affordable.
 5. **Never cancel an append.** Dropping an idempotent publish after it was sent and before its answer ends the producer (`IdempotentProducer::publish_batch`), and an HTTP handler is dropped whenever the sender hangs up. So the append runs on its own task, and a sender that disconnects still gets its webhook stored. A failed append is re-sent with the same bytes a few times, which cannot duplicate it. If it still fails, intake answers `503` and starts a new producer: the old batch is in doubt, so the sender's retry can land a second copy, and the sender's id is what tells the two apart.
@@ -485,9 +487,12 @@ checks.
 
 Intake verifies four schemes in M1: Standard Webhooks, GitHub's
 `X-Hub-Signature-256`, Stripe's `Stripe-Signature` with its timestamp
-tolerance, and a generic HMAC-SHA256 header with a configurable name. A
-source with no scheme must use a long random path token instead, and the
-admin page says plainly that it is weaker.
+tolerance, and a generic HMAC-SHA256 header with a configurable name, hex or
+base64. A source with no scheme must use a long random token instead, sent as
+the last path segment, `/in/<tenant>/<source>/<token>`, and the admin page
+says plainly that it is weaker. The unit tests use the published vectors for
+Standard Webhooks and GitHub; Stripe documents its construction but not a
+vector with a known secret, so its vector was computed outside the relay.
 
 ## Multi-tenancy and auth
 
@@ -562,6 +567,13 @@ at build time beyond crates.
 | `GET /api/<tenant>/dead`, `POST .../redrive`, `POST .../discard` | Both kinds of dead letter |
 | `GET /api/<tenant>/events/<source>/<offset>` | One event, its envelope, and its recent attempts |
 | `GET /healthz`, `GET /metrics` | Liveness and Prometheus metrics, per role |
+
+**The JSON API comes before the page and sign-in.** Sources and endpoints
+have to be written somewhere from M1 on, so the routes that write them land
+first, with no sign-in and the relay's own Felix connection. Until sign-in
+lands, the admin listener belongs on a private address. A secret given to the
+API is sealed before it is written and never shown again; one the relay makes
+up is shown once, in the answer that created it.
 
 **Lag is computed, not read.** Felix has no client call for a group's cursor
 (`committed` is broker-internal, `reader.rs`). Each worker writes its last
