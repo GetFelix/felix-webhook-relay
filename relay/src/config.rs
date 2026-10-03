@@ -68,6 +68,13 @@ pub(crate) struct Config {
     /// `RELAY_OIDC_ISSUER`, `RELAY_OIDC_CLIENT_ID`, `RELAY_OIDC_CLIENT_SECRET`:
     /// how admins sign in. Required for the admin role.
     pub(crate) oidc: Option<Oidc>,
+    /// `RELAY_REPLAY_WINDOW`: how far back replays should reach. With
+    /// `RELAY_DISABLE_AFTER`, the retention the relay needs from the broker.
+    /// Default `7d`.
+    pub(crate) replay_window: Duration,
+    /// `RELAY_STREAM_REPLICAS`: how many brokers hold each source's stream.
+    /// Above 1 its writes also wait for a majority (`Quorum`). Default 1.
+    pub(crate) stream_replicas: u32,
     /// `RELAY_PUBLIC_URL`: where browsers reach this process, for the sign-in
     /// redirect. Default `http://<RELAY_LISTEN>`.
     pub(crate) public_url: String,
@@ -166,6 +173,11 @@ impl Config {
                 .trim_end_matches('/')
                 .to_string(),
             oidc,
+            replay_window: parse_duration(&or("RELAY_REPLAY_WINDOW", "7d"))
+                .context("RELAY_REPLAY_WINDOW is like 7d")?,
+            stream_replicas: or("RELAY_STREAM_REPLICAS", "1")
+                .parse()
+                .context("parse RELAY_STREAM_REPLICAS")?,
             public_url: var("RELAY_PUBLIC_URL")
                 .unwrap_or_else(|| format!("http://{listen}"))
                 .trim_end_matches('/')

@@ -237,9 +237,9 @@ async fn create_stream(
             "stream": stream,
             "kind": "Stream",
             "shards": 1,
-            "replication_factor": 1,
+            "replication_factor": config.stream_replicas,
             "retention": { "max_age_seconds": null, "max_size_bytes": null },
-            "consistency": "Leader",
+            "consistency": if config.stream_replicas > 1 { "Quorum" } else { "Leader" },
             "delivery": "AtLeastOnce",
             "durable": true
         }))
@@ -358,23 +358,12 @@ async fn put_endpoint(
 /// there, because a new Felix group starts at the beginning of the log and
 /// cannot be told otherwise.
 async fn source_tail(tenant: &Tenant, source: &str) -> Result<u64, ApiError> {
-    let felix = &tenant.felix;
-    let subscription = felix
-        .client()
-        .subscribe_from(
-            &felix.tenant,
-            &felix.namespace,
-            &format!("src.{source}"),
-            Some(felix_client::StartPosition::Latest),
-        )
+    let (_, tail) = tenant
+        .felix
+        .bounds(&format!("src.{source}"))
         .await
         .map_err(|err| bad_request(format!("source {source} has no stream: {err:#}")))?;
-    subscription.live_offset().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no tail offset".to_string(),
-        )
-    })
+    Ok(tail)
 }
 
 async fn get_endpoint(Admin(tenant, _): Admin, Path((_, id)): Path<(String, String)>) -> ApiResult {
