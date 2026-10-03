@@ -1,25 +1,39 @@
 name: Images
 
 # Every pull request builds the image for both platforms, runs the compose
-# install from it, and installs the Helm chart on kind. A v* tag also pushes
-# the image to GHCR, signs it, and runs the install again from what was
-# published. None of these jobs are required checks.
+# install from it, and installs the Helm chart on kind. The release workflow
+# calls this with `push`, which pushes the image to GHCR, signs it, and runs
+# the install again from what was published. None of these jobs are required
+# checks.
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
+  workflow_call:
+    inputs:
+      push:
+        description: Push and sign the image, tagged with `version`
+        type: boolean
+        default: false
+      ref:
+        description: What to build
+        type: string
+        default: ""
+      version:
+        description: The release's version, without the v
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: images-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
+  group: images-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/felix-webhook-relay
-  PUSH: ${{ github.ref_type == 'tag' }}
+  PUSH: ${{ inputs.push == true }}
   # The Felix release the install and the chart are tested against.
   FELIX_VERSION: v0.6.0-preview
 
@@ -46,19 +60,8 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      - name: The tag matches the versions the install pins
-        if: env.PUSH == 'true'
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          grep -q "felix-webhook-relay:\${RELAY_VERSION:-${version}}" deploy/compose/docker-compose.yml || {
-            echo "::error::deploy/compose/docker-compose.yml does not default RELAY_VERSION to ${version}"
-            exit 1
-          }
-          grep -qx "appVersion: \"${version}\"" deploy/helm/felix-webhook-relay/Chart.yaml || {
-            echo "::error::deploy/helm/felix-webhook-relay/Chart.yaml does not set appVersion to ${version}"
-            exit 1
-          }
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -124,7 +127,7 @@ jobs:
   manifest:
     name: Publish
     needs: build
-    if: github.ref_type == 'tag'
+    if: inputs.push
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -159,9 +162,9 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern={{version}},value=v${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ inputs.version }}
+            type=raw,value=latest,enable=${{ !contains(inputs.version, '-') }}
 
       - name: Create the manifest list
         id: merge
@@ -194,7 +197,7 @@ jobs:
           printf '```\n%s\ndigest: %s\n```\n' "$TAGS" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
   # The release compose file, started the way the self-hosting guide starts
-  # it, from the image this run built or on a tag the one it published, and a
+  # it, from the image this run built or the one it published, and a
   # webhook sent through it to an endpoint that goes down and comes back.
   install:
     name: Compose install
@@ -207,9 +210,11 @@ jobs:
         working-directory: deploy/compose
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Load the image this run built
-        if: github.ref_type != 'tag'
+        if: env.PUSH != 'true'
         uses: actions/download-artifact@v4
         with:
           name: image
@@ -217,8 +222,8 @@ jobs:
 
       - name: Choose the image
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            echo "RELAY_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          if [ "$PUSH" = true ]; then
+            echo "RELAY_VERSION=${{ inputs.version }}" >> "$GITHUB_ENV"
           else
             docker load -i "$RUNNER_TEMP/image/image.tar"
             echo "RELAY_VERSION=ci" >> "$GITHUB_ENV"
@@ -252,11 +257,13 @@ jobs:
   chart:
     name: Helm chart on kind
     needs: build
-    if: github.ref_type != 'tag'
+    if: ${{ !inputs.push }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: The Felix chart
         uses: actions/checkout@v4

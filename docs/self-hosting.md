@@ -19,11 +19,12 @@ beside them: every webhook, cursor, setting and secret lives in Felix.
 | `dex` | `ghcr.io/dexidp/dex` | No | The stand-in sign-in for a first run |
 
 The relay image is built for `linux/amd64` and `linux/arm64` and signed with
-cosign by the release workflow. To check one before you run it:
+cosign by the release workflow, as is the Helm chart. To check either before
+you run it (for the chart, `ghcr.io/gabloe/charts/felix-webhook-relay:0.1.0`):
 
 ```bash
 cosign verify ghcr.io/gabloe/felix-webhook-relay:0.1.0 \
-  --certificate-identity-regexp 'https://github.com/gabloe/felix-webhook-relay/.github/workflows/images.yml@refs/tags/v.*' \
+  --certificate-identity-regexp 'https://github.com/gabloe/felix-webhook-relay/.github/workflows/.*@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -34,12 +35,13 @@ and disk for the webhooks. Each source is a Felix stream, and each stream
 reserves a log segment up front (`FELIX_SEGMENT_BYTES`, 16 MiB here), so a
 source costs 16 MiB before its first webhook.
 
-1. Get the compose file and its settings for a release, from `deploy/compose/`
-   of the release's source:
+1. Get the compose bundle for a release. It is the compose file, its `.env`
+   and the stand-in's `dex.yaml`, with the release's image tag written in:
 
    ```bash
-   git clone --depth 1 --branch v0.1.0 https://github.com/gabloe/felix-webhook-relay
-   cd felix-webhook-relay/deploy/compose
+   curl -fsSLO https://github.com/gabloe/felix-webhook-relay/releases/download/v0.1.0/felix-webhook-relay-compose-0.1.0.tar.gz
+   tar xzf felix-webhook-relay-compose-0.1.0.tar.gz
+   cd felix-webhook-relay-compose-0.1.0
    ```
 
 2. Edit `.env`. Set `FELIX_BOOTSTRAP_TOKEN`, `FELIX_RAFT_PEER_TOKEN` and
@@ -277,11 +279,13 @@ upgrades to three delivery workers.
    helm install felix felix/deploy/helm/felix -f felix-values.yaml
    ```
 
-3. This chart. Its `tokens` Deployment seeds Felix and stores the broker
-   credential in the Secret `felix-webhook-relay-broker-credential`:
+3. This chart, which each release publishes as a signed OCI chart and
+   attaches to the release. Its `tokens` Deployment seeds Felix and stores
+   the broker credential in the Secret `felix-webhook-relay-broker-credential`:
 
    ```bash
-   helm install felix-webhook-relay deploy/helm/felix-webhook-relay -f relay-values.yaml
+   helm install felix-webhook-relay oci://ghcr.io/gabloe/charts/felix-webhook-relay \
+     --version 0.1.0 -f relay-values.yaml
    kubectl wait --for=condition=available deployment/felix-webhook-relay-tokens
    ```
 

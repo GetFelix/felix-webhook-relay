@@ -48,3 +48,12 @@ milestone is a [GitHub milestone](https://github.com/gabloe/felix-webhook-relay/
 each piece of it is an issue, and each milestone lands as one pull request that
 closes its issues. When Felix gets in the way, file an issue on
 [Felix](https://github.com/gabloe/felix/issues) and link it from the pull request.
+
+## Releases
+
+Bump the version in `core/Cargo.toml`, `relay/Cargo.toml`, the chart's
+`version` and `appVersion`, and the compose file's `RELAY_VERSION` defaults,
+and add the version's section to `CHANGELOG.md`. A `v<version>` tag then runs
+`.github/workflows/release.yml`, which refuses a tag that disagrees with any
+of them (`scripts/release-notes.sh` is the check). Rehearse first by running
+the workflow by hand with `dry_run`, and `ref` set to the branch.
