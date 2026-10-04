@@ -23,10 +23,8 @@ controlplane:
     # The tokens service is plain HTTP inside the cluster.
     - name: FELIX_CONTROLPLANE_OIDC_ALLOW_INSECURE_HTTP
       value: "true"
-    # 0.6.0-preview accepts only ES256 unless told otherwise.
-    - name: FELIX_CONTROLPLANE_OIDC_ALLOWED_ALGORITHMS
-      value: ES256,RS256
-    # The broker reads its token once (felix#955).
+    # The tokens service renews the broker's token every quarter of its
+    # token lifetime, a day by default.
     - name: FELIX_EXCHANGE_TOKEN_TTL_SECONDS
       value: "2592000"
 broker:

@@ -385,9 +385,9 @@ dependencies = [
 
 [[package]]
 name = "felix-client"
-version = "0.6.0-preview"
+version = "0.6.0-preview.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5e3b5dbde6697a6327601a10aaf829480b04b73effa1c263c79b2a48260d10f"
+checksum = "510d3f5e03e3ad5359fabeb92c4a3e522f3aa5669b874fe9b28d15f50c1fcdb6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -450,9 +450,9 @@ dependencies = [
 
 [[package]]
 name = "felix-transport"
-version = "0.6.0-preview"
+version = "0.6.0-preview.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de161e28c573f5c1057f4e45e19d5cf54d9424a5508d59a7e532869446319e40"
+checksum = "061499112a74b73402756615a2f7abd26ec215832b150e70f1e3c9879b4c3e7e"
 dependencies = [
  "anyhow",
  "libc",
@@ -466,9 +466,9 @@ dependencies = [
 
 [[package]]
 name = "felix-wire"
-version = "0.6.0-preview"
+version = "0.6.0-preview.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0718ff3aadbaa610ce2bc661b697773619e9fc505058b02d8dfa6905edf1bc1e"
+checksum = "06e16fb83a00ea6ed87cef3c16c7a6a4f58d40574a25c01510301a78a85738d4"
 dependencies = [
  "base64 0.23.1",
  "bytes",

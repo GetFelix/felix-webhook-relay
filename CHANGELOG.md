@@ -2,6 +2,15 @@
 
 Each release's section is its GitHub release notes.
 
+## Unreleased
+
+- Runs on Felix 0.6.0-preview.2, from `ghcr.io/getfelix`, and its client
+  crates.
+- The `tokens` service renews the broker's token along with the relay's, so
+  brokers no longer need a restart within `FELIX_TOKEN_TTL_SECONDS`.
+- `FELIX_OIDC_ALGORITHMS` is gone: Felix now accepts RS256 ID tokens by
+  default.
+
 ## [0.1.0]
 
 The first release: a self-hosted webhook relay whose only backend is Felix
