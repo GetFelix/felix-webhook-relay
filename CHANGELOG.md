@@ -50,8 +50,8 @@ The first release: a self-hosted webhook relay whose only backend is Felix
 
 ### Self-hosting
 
-- One image for amd64 and arm64, `ghcr.io/gabloe/felix-webhook-relay`, signed
+- One image for amd64 and arm64, `ghcr.io/getfelix/felix-webhook-relay`, signed
   with cosign.
 - A compose install with Felix and nothing else, and a Helm chart, published
-  as `oci://ghcr.io/gabloe/charts/felix-webhook-relay`. `docs/self-hosting.md`
+  as `oci://ghcr.io/getfelix/charts/felix-webhook-relay`. `docs/self-hosting.md`
   is the guide.

@@ -32,7 +32,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/felix-webhook-relay
   PUSH: ${{ inputs.push == true }}
   # The Felix release the chart is tested against. Not FELIX_VERSION, which
   # the compose file reads.
@@ -60,6 +59,10 @@ jobs:
             platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
+      # GHCR names must be lowercase and the owner is GetFelix.
+      - name: Registry names
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/felix-webhook-relay" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -138,6 +141,10 @@ jobs:
       # workflow's OIDC identity, so there is no key to store.
       id-token: write
     steps:
+      # GHCR names must be lowercase and the owner is GetFelix.
+      - name: Registry names
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/felix-webhook-relay" >> "$GITHUB_ENV"
+
       - name: Download the platform digests
         uses: actions/download-artifact@v4
         with:
@@ -265,6 +272,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # GHCR names must be lowercase and the owner is GetFelix.
+      - name: Registry names
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/felix-webhook-relay" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -272,7 +283,7 @@ jobs:
       - name: The Felix chart
         uses: actions/checkout@v4
         with:
-          repository: gabloe/felix
+          repository: GetFelix/felix
           ref: ${{ env.FELIX_CHART_REF }}
           path: felix
           sparse-checkout: deploy/helm/felix

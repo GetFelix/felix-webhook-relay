@@ -44,10 +44,10 @@ milestone plan are in [docs/design.md](docs/design.md).
 ## Milestones and issues
 
 Work follows the build order in [design.md](docs/design.md#build-order). Each
-milestone is a [GitHub milestone](https://github.com/gabloe/felix-webhook-relay/milestones),
+milestone is a [GitHub milestone](https://github.com/GetFelix/felix-webhook-relay/milestones),
 each piece of it is an issue, and each milestone lands as one pull request that
 closes its issues. When Felix gets in the way, file an issue on
-[Felix](https://github.com/gabloe/felix/issues) and link it from the pull request.
+[Felix](https://github.com/GetFelix/felix/issues) and link it from the pull request.
 
 ## Releases
 

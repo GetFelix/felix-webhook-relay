@@ -36,7 +36,6 @@ env:
   # nothing is published from a commit that is not the tag.
   SOURCE_REF: ${{ inputs.ref || inputs.tag || github.ref_name }}
   DRY_RUN: ${{ inputs.dry_run == true }}
-  CHART_REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
 
 jobs:
   check:
@@ -99,6 +98,10 @@ jobs:
     env:
       VERSION: ${{ needs.check.outputs.version }}
     steps:
+      # GHCR names must be lowercase and the owner is GetFelix.
+      - name: Registry names
+        run: echo "CHART_REGISTRY=oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.check.outputs.ref }}

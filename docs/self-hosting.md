@@ -12,19 +12,21 @@ beside them: every webhook, cursor, setting and secret lives in Felix.
 
 | Service | Image | Holds state? | Job |
 |---|---|---|---|
-| `relay` | `ghcr.io/gabloe/felix-webhook-relay` | No | Intake, delivery and admin in one process; `RELAY_ROLES` splits them |
+| `relay` | `ghcr.io/getfelix/felix-webhook-relay` | No | Intake, delivery and admin in one process; `RELAY_ROLES` splits them |
 | `broker` | `ghcr.io/gabloe/felix-broker` | Yes, `felix-data` | Felix: every source's log, the groups, the caches |
 | `controlplane` | `ghcr.io/gabloe/felix-controlplane` | Yes, `controlplane-data` | Felix: the tenant, namespaces, roles and token exchange, in its own Raft log |
 | `tokens` | the relay image | No | At each start: seeds Felix and makes the broker a certificate the first time. Then keeps the relay's IdP token fresh. Never published |
 | `dex` | `ghcr.io/dexidp/dex` | No | The stand-in sign-in for a first run |
 
+Felix 0.6.0-preview, which the install pins, is published under `ghcr.io/gabloe`; Felix releases after it publish under `ghcr.io/getfelix`.
+
 The relay image is built for `linux/amd64` and `linux/arm64` and signed with
 cosign by the release workflow, as is the Helm chart. To check either before
-you run it (for the chart, `ghcr.io/gabloe/charts/felix-webhook-relay:0.1.0`):
+you run it (for the chart, `ghcr.io/getfelix/charts/felix-webhook-relay:0.1.0`):
 
 ```bash
-cosign verify ghcr.io/gabloe/felix-webhook-relay:0.1.0 \
-  --certificate-identity-regexp 'https://github.com/gabloe/felix-webhook-relay/.github/workflows/.*@refs/tags/v.*' \
+cosign verify ghcr.io/getfelix/felix-webhook-relay:0.1.0 \
+  --certificate-identity-regexp 'https://github.com/GetFelix/felix-webhook-relay/.github/workflows/.*@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -39,7 +41,7 @@ source costs 16 MiB before its first webhook.
    and the stand-in's `dex.yaml`, with the release's image tag written in:
 
    ```bash
-   curl -fsSLO https://github.com/gabloe/felix-webhook-relay/releases/download/v0.1.0/felix-webhook-relay-compose-0.1.0.tar.gz
+   curl -fsSLO https://github.com/GetFelix/felix-webhook-relay/releases/download/v0.1.0/felix-webhook-relay-compose-0.1.0.tar.gz
    tar xzf felix-webhook-relay-compose-0.1.0.tar.gz
    cd felix-webhook-relay-compose-0.1.0
    ```
@@ -180,7 +182,7 @@ them in the felix chart:
 | Setting | Here | Why |
 |---|---|---|
 | `FELIX_DURABLE_RETENTION_SECONDS` | `1209600` (14 days) | Retention must be longer than `RELAY_DISABLE_AFTER` plus `RELAY_REPLAY_WINDOW` (10 days by default), or an endpoint that was down, or a replay, loses webhooks. The relay warns at startup and on the admin page when a source was trimmed too young. Retention is broker-wide |
-| `FELIX_GROUP_VISIBILITY_TIMEOUT_MS` | `30000` | How long a claim lasts. A restarted worker waits `RELAY_CLAIM_WAIT_MS` before its first poll, so its predecessor's claims lapse first ([felix#962](https://github.com/gabloe/felix/issues/962)). Keep the two equal |
+| `FELIX_GROUP_VISIBILITY_TIMEOUT_MS` | `30000` | How long a claim lasts. A restarted worker waits `RELAY_CLAIM_WAIT_MS` before its first poll, so its predecessor's claims lapse first ([felix#962](https://github.com/GetFelix/felix/issues/962)). Keep the two equal |
 | `FELIX_DURABLE_SEGMENT_BYTES` | `16777216` | Every source is a stream, and each log reserves a whole segment on disk up front: 256 MiB per source at Felix's default. Turning off `FELIX_DURABLE_PREALLOCATE` does the same |
 | `FELIX_DURABLE_FSYNC_MODE`, `FELIX_ACK_ON_COMMIT` | `on_commit`, `true` | Intake answers `202` only after the broker acknowledges, and this makes the acknowledgement wait for the device |
 | `FELIX_SUB_QUEUE_BOUND` | `8192` | The writer queue is per connection, and the relay holds many subscriptions on one |
@@ -239,7 +241,7 @@ A restarted delivery process waits `RELAY_CLAIM_WAIT_MS`, 30 seconds by
 default, before it delivers again, so every upgrade pauses delivery that long.
 
 On Felix 0.6.0-preview the broker reads its token once, at start
-([felix#955](https://github.com/gabloe/felix/issues/955)), and the token lasts
+([felix#955](https://github.com/GetFelix/felix/issues/955)), and the token lasts
 `FELIX_TOKEN_TTL_SECONDS`, 30 days. Restart at least that often, which also
 mints a new one:
 
@@ -250,7 +252,7 @@ docker compose up -d --force-recreate
 ## Kubernetes
 
 `deploy/helm/felix-webhook-relay` runs the relay next to a release of the
-[felix chart](https://github.com/gabloe/felix/tree/main/deploy/helm/felix):
+[felix chart](https://github.com/GetFelix/felix/tree/main/deploy/helm/felix):
 intake as a Deployment, delivery as a StatefulSet whose ordinal is
 `RELAY_WORKER_INDEX`, admin as a Deployment behind an ingress, and the
 `tokens` service. The [chart's README](../deploy/helm/felix-webhook-relay/README.md)
@@ -275,7 +277,7 @@ upgrades to three delivery workers.
    database, and the broker settings above.
 
    ```bash
-   git clone --depth 1 --branch v0.6.0-preview https://github.com/gabloe/felix
+   git clone --depth 1 --branch v0.6.0-preview https://github.com/GetFelix/felix
    helm install felix felix/deploy/helm/felix -f felix-values.yaml
    ```
 
@@ -284,7 +286,7 @@ upgrades to three delivery workers.
    the broker credential in the Secret `felix-webhook-relay-broker-credential`:
 
    ```bash
-   helm install felix-webhook-relay oci://ghcr.io/gabloe/charts/felix-webhook-relay \
+   helm install felix-webhook-relay oci://ghcr.io/getfelix/charts/felix-webhook-relay \
      --version 0.1.0 -f relay-values.yaml
    kubectl wait --for=condition=available deployment/felix-webhook-relay-tokens
    ```
@@ -329,7 +331,7 @@ Every `helm upgrade` of this chart restarts the `tokens` pod, which seeds
 again and mints new tokens. It rewrites the relay's IdP token in its Secret
 every six hours, and the relay reads it from the mounted file before each
 exchange. The broker reads its credential only at start
-([felix#955](https://github.com/gabloe/felix/issues/955)), so restart the
+([felix#955](https://github.com/GetFelix/felix/issues/955)), so restart the
 brokers within `FELIX_EXCHANGE_TOKEN_TTL_SECONDS` of the last upgrade.
 
 Changing `deliver.replicas` moves endpoints between workers. Each moved
@@ -415,9 +417,9 @@ and exits, which is how `dev/` uses it. The script is `deploy/seed.sh`.
 
 | What | Why | Felix issue |
 |---|---|---|
-| The `tokens` service | Felix issues tokens only in exchange for an IdP token, so the relay's service accounts need a provider of their own | [#954](https://github.com/gabloe/felix/issues/954) |
-| `FELIX_TOKEN_TTL_SECONDS` of 30 days and a restart within it | A standalone 0.6.0-preview broker reads its token once; fixed on Felix main, not yet released | [#955](https://github.com/gabloe/felix/issues/955) |
-| `FELIX_OIDC_ALGORITHMS=ES256,RS256` | 0.6.0-preview accepts only ES256; fixed on Felix main, not yet released | [#984](https://github.com/gabloe/felix/issues/984) |
-| `RELAY_CLAIM_WAIT_MS` equal to the visibility timeout | A restarted group member cannot take back its predecessor's claims | [#962](https://github.com/gabloe/felix/issues/962) |
+| The `tokens` service | Felix issues tokens only in exchange for an IdP token, so the relay's service accounts need a provider of their own | [#954](https://github.com/GetFelix/felix/issues/954) |
+| `FELIX_TOKEN_TTL_SECONDS` of 30 days and a restart within it | A standalone 0.6.0-preview broker reads its token once; fixed on Felix main, not yet released | [#955](https://github.com/GetFelix/felix/issues/955) |
+| `FELIX_OIDC_ALGORITHMS=ES256,RS256` | 0.6.0-preview accepts only ES256; fixed on Felix main, not yet released | [#984](https://github.com/GetFelix/felix/issues/984) |
+| `RELAY_CLAIM_WAIT_MS` equal to the visibility timeout | A restarted group member cannot take back its predecessor's claims | [#962](https://github.com/GetFelix/felix/issues/962) |
 | Small segments | Segment size and preallocation are broker-wide, so each source's stream reserves a whole segment | Not filed |
 | Retention set on the broker | Retention is broker-wide only | Not filed |
