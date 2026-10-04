@@ -23,19 +23,16 @@ services:
       - "127.0.0.1:5556:5556"
 
   controlplane:
-    # Felix 0.6.0-preview is published under gabloe; later releases publish under getfelix.
-    image: ghcr.io/gabloe/felix-controlplane:0.6.0-preview
+    image: ghcr.io/getfelix/felix-controlplane:0.6.0-preview.2
     environment:
       # In-memory store: a restart of the stack starts from nothing.
       FELIX_BOOTSTRAP_ENABLED: "true"
       FELIX_BOOTSTRAP_BIND_ADDR: 0.0.0.0:9095
       FELIX_BOOTSTRAP_TOKEN: dev-bootstrap
-      # The dev IdP is plain HTTP on the compose network and signs with RS256,
-      # which openssl can do from a shell.
+      # The dev IdP is plain HTTP on the compose network.
       FELIX_CONTROLPLANE_OIDC_ALLOW_INSECURE_HTTP: "true"
-      FELIX_CONTROLPLANE_OIDC_ALLOWED_ALGORITHMS: RS256
-      # The broker reads its credential once at startup, so the default 15
-      # minutes would end a dev session early (felix#955).
+      # The seed writes the broker's token once, so the default 15 minutes
+      # would end a dev session early.
       FELIX_EXCHANGE_TOKEN_TTL_SECONDS: "86400"
       RUST_LOG: info
     ports:
@@ -68,8 +65,7 @@ services:
         condition: service_started
 
   broker:
-    # Felix 0.6.0-preview is published under gabloe; later releases publish under getfelix.
-    image: ghcr.io/gabloe/felix-broker:0.6.0-preview
+    image: ghcr.io/getfelix/felix-broker:0.6.0-preview.2
     environment:
       FELIX_CONTROLPLANE_URL: http://controlplane:8443
       FELIX_NODE_TOKEN_FILE: /state/node.token

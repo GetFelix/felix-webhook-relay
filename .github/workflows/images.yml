@@ -35,7 +35,7 @@ env:
   PUSH: ${{ inputs.push == true }}
   # The Felix release the chart is tested against. Not FELIX_VERSION, which
   # the compose file reads.
-  FELIX_CHART_REF: v0.6.0-preview
+  FELIX_CHART_REF: v0.6.0-preview.2
 
 jobs:
   # Each platform builds on a runner of its own architecture and, on a tag, is

@@ -821,9 +821,9 @@ name brokers rather than pin their IPs, and `RELAY_OIDC_INTERNAL_URL` lets
 the relay call an IdP's token endpoint at another address than browsers use,
 as with Dex on the compose network.
 
-A standalone 0.6.0-preview broker reads its node token once, so the dev stack
-sets `FELIX_EXCHANGE_TOKEN_TTL_SECONDS=86400` and the install 30 days, as
-felix-canvas does ([felix#955](https://github.com/GetFelix/felix/issues/955)).
+The broker re-reads its node token file, and the install's `tokens` service
+rewrites it every six hours. The dev stack's seed writes it once, so the dev
+stack sets `FELIX_EXCHANGE_TOKEN_TTL_SECONDS=86400`.
 The dev stack also sets `FELIX_GROUP_VISIBILITY_TIMEOUT_MS=5000`, so tests see
 claims lapse while a worker retries, and a relay on it can use
 `RELAY_CLAIM_WAIT_MS=5000`.

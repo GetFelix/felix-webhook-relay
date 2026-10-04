@@ -8,8 +8,8 @@
 # Felix issues tokens only in exchange for an IdP token (felix#954), so the
 # services sign in with a key this script makes. `seed.sh` seeds once, for
 # the development stack. `seed.sh serve` is the install's `tokens` service:
-# it serves the key's JWKS, seeds, and then keeps the relay's IdP token
-# fresh. docs/self-hosting.md describes every setting.
+# it serves the key's JWKS, seeds, and then keeps the relay's IdP token and
+# the broker's token fresh. docs/self-hosting.md describes every setting.
 set -eu
 
 CONTROL_PLANE=${FELIX_CONTROL_PLANE:-http://controlplane:8443}
@@ -225,15 +225,21 @@ seed() {
     chmod 644 "$STATE/broker-cert.pem" "$STATE/broker-key.pem"
   fi
 
-  node=$(exchange relay-broker '{"audience": "felix-controlplane"}')
-  write node.token "$node"
-  if [ -n "${NODE_TOKEN_SECRET:-}" ]; then store_secret "$NODE_TOKEN_SECRET" "$node"; fi
+  node_token
   # The tests act as an operator and as the relay with these.
   if [ "${SEED_TEST_TOKENS:-}" = 1 ]; then
     write admin.token "$admin"
     write relay.token "$(exchange relay-service \
       '{"requested": ["stream.publish", "stream.subscribe", "group.manage", "cache.read", "cache.write"]}')"
   fi
+}
+
+# The broker re-reads its token file, so renewing it here keeps the broker's
+# control-plane credential current without a restart.
+node_token() {
+  node=$(exchange relay-broker '{"audience": "felix-controlplane"}') || return 1
+  write node.token "$node"
+  if [ -n "${NODE_TOKEN_SECRET:-}" ]; then store_secret "$NODE_TOKEN_SECRET" "$node" || return 1; fi
   echo "wrote node.token to $STATE"
 }
 
@@ -255,6 +261,7 @@ case "${1:-}" in
     touch "$STATE/seeded"
     while :; do
       relay_token
+      node_token || echo "renewing node.token failed; the broker keeps the current one" >&2
       sleep $((TOKEN_LIFETIME / 4))
     done
     ;;

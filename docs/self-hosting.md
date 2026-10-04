@@ -13,12 +13,10 @@ beside them: every webhook, cursor, setting and secret lives in Felix.
 | Service | Image | Holds state? | Job |
 |---|---|---|---|
 | `relay` | `ghcr.io/getfelix/felix-webhook-relay` | No | Intake, delivery and admin in one process; `RELAY_ROLES` splits them |
-| `broker` | `ghcr.io/gabloe/felix-broker` | Yes, `felix-data` | Felix: every source's log, the groups, the caches |
-| `controlplane` | `ghcr.io/gabloe/felix-controlplane` | Yes, `controlplane-data` | Felix: the tenant, namespaces, roles and token exchange, in its own Raft log |
-| `tokens` | the relay image | No | At each start: seeds Felix and makes the broker a certificate the first time. Then keeps the relay's IdP token fresh. Never published |
+| `broker` | `ghcr.io/getfelix/felix-broker` | Yes, `felix-data` | Felix: every source's log, the groups, the caches |
+| `controlplane` | `ghcr.io/getfelix/felix-controlplane` | Yes, `controlplane-data` | Felix: the tenant, namespaces, roles and token exchange, in its own Raft log |
+| `tokens` | the relay image | No | At each start: seeds Felix and makes the broker a certificate the first time. Then keeps the relay's IdP token and the broker's token fresh. Never published |
 | `dex` | `ghcr.io/dexidp/dex` | No | The stand-in sign-in for a first run |
-
-Felix 0.6.0-preview, which the install pins, is published under `ghcr.io/gabloe`; Felix releases after it publish under `ghcr.io/getfelix`.
 
 The relay image is built for `linux/amd64` and `linux/arm64` and signed with
 cosign by the release workflow, as is the Helm chart. To check either before
@@ -187,10 +185,6 @@ them in the felix chart:
 | `FELIX_DURABLE_FSYNC_MODE`, `FELIX_ACK_ON_COMMIT` | `on_commit`, `true` | Intake answers `202` only after the broker acknowledges, and this makes the acknowledgement wait for the device |
 | `FELIX_SUB_QUEUE_BOUND` | `8192` | The writer queue is per connection, and the relay holds many subscriptions on one |
 
-The control plane also needs `FELIX_CONTROLPLANE_OIDC_ALLOWED_ALGORITHMS`
-to include `RS256` on Felix 0.6.0-preview, which accepts only ES256 by
-default; later releases accept RS256 on their own.
-
 ## TLS between the relay and Felix
 
 QUIC is always TLS. On the first start the `tokens` service writes a
@@ -240,14 +234,10 @@ docker compose up -d
 A restarted delivery process waits `RELAY_CLAIM_WAIT_MS`, 30 seconds by
 default, before it delivers again, so every upgrade pauses delivery that long.
 
-On Felix 0.6.0-preview the broker reads its token once, at start
-([felix#955](https://github.com/GetFelix/felix/issues/955)), and the token lasts
-`FELIX_TOKEN_TTL_SECONDS`, 30 days. Restart at least that often, which also
-mints a new one:
-
-```bash
-docker compose up -d --force-recreate
-```
+The `tokens` service renews the broker's token every quarter of
+`RELAY_TOKEN_LIFETIME_SECONDS`, and the broker re-reads it, so nothing needs a
+periodic restart. `FELIX_TOKEN_TTL_SECONDS` must stay longer than that
+interval.
 
 ## Kubernetes
 
@@ -277,7 +267,7 @@ upgrades to three delivery workers.
    database, and the broker settings above.
 
    ```bash
-   git clone --depth 1 --branch v0.6.0-preview https://github.com/GetFelix/felix
+   git clone --depth 1 --branch v0.6.0-preview.2 https://github.com/GetFelix/felix
    helm install felix felix/deploy/helm/felix -f felix-values.yaml
    ```
 
@@ -328,11 +318,9 @@ With three or more brokers, set `felix.replicas: 3` before the first install,
 so every stream and cache is on three brokers and survives losing one.
 
 Every `helm upgrade` of this chart restarts the `tokens` pod, which seeds
-again and mints new tokens. It rewrites the relay's IdP token in its Secret
-every six hours, and the relay reads it from the mounted file before each
-exchange. The broker reads its credential only at start
-([felix#955](https://github.com/GetFelix/felix/issues/955)), so restart the
-brokers within `FELIX_EXCHANGE_TOKEN_TTL_SECONDS` of the last upgrade.
+again and mints new tokens. It rewrites the relay's IdP token and the broker
+credential in their Secrets every six hours. The relay reads its token from
+the mounted file before each exchange, and the brokers re-read theirs.
 
 Changing `deliver.replicas` moves endpoints between workers. Each moved
 endpoint waits `RELAY_CLAIM_WAIT_MS` on its new worker and resumes from its
@@ -355,7 +343,6 @@ group's cursor.
 | `RELAY_OIDC_*` | the stand-in Dex | As for the relay and the `tokens` service below |
 | `RELAY_VERSION` | the release | The relay image's tag |
 | `FELIX_VERSION` | the release's Felix | The Felix images' tag |
-| `FELIX_OIDC_ALGORITHMS` | `ES256,RS256` | ID token algorithms Felix accepts |
 | `FELIX_SEGMENT_BYTES` | `16777216` | The broker's log segment size, which each source reserves up front |
 | `FELIX_RETENTION_SECONDS` | `1209600` | How long the broker keeps records |
 | `FELIX_TOKEN_TTL_SECONDS` | `2592000` | How long a token from the control plane lasts |
@@ -418,8 +405,6 @@ and exits, which is how `dev/` uses it. The script is `deploy/seed.sh`.
 | What | Why | Felix issue |
 |---|---|---|
 | The `tokens` service | Felix issues tokens only in exchange for an IdP token, so the relay's service accounts need a provider of their own | [#954](https://github.com/GetFelix/felix/issues/954) |
-| `FELIX_TOKEN_TTL_SECONDS` of 30 days and a restart within it | A standalone 0.6.0-preview broker reads its token once; fixed on Felix main, not yet released | [#955](https://github.com/GetFelix/felix/issues/955) |
-| `FELIX_OIDC_ALGORITHMS=ES256,RS256` | 0.6.0-preview accepts only ES256; fixed on Felix main, not yet released | [#984](https://github.com/GetFelix/felix/issues/984) |
 | `RELAY_CLAIM_WAIT_MS` equal to the visibility timeout | A restarted group member cannot take back its predecessor's claims | [#962](https://github.com/GetFelix/felix/issues/962) |
 | Small segments | Segment size and preallocation are broker-wide, so each source's stream reserves a whole segment | Not filed |
 | Retention set on the broker | Retention is broker-wide only | Not filed |
