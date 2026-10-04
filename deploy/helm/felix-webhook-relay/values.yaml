@@ -2,7 +2,7 @@
 # describes the install and the relay setting each value sets.
 
 image:
-  repository: ghcr.io/gabloe/felix-webhook-relay
+  repository: ghcr.io/getfelix/felix-webhook-relay
   # Defaults to the chart's appVersion.
   tag: ""
   # Pin by digest in production: images are signed by digest. Wins over the tag.

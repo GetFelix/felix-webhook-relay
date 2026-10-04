@@ -23,6 +23,7 @@ services:
       - "127.0.0.1:5556:5556"
 
   controlplane:
+    # Felix 0.6.0-preview is published under gabloe; later releases publish under getfelix.
     image: ghcr.io/gabloe/felix-controlplane:0.6.0-preview
     environment:
       # In-memory store: a restart of the stack starts from nothing.
@@ -67,6 +68,7 @@ services:
         condition: service_started
 
   broker:
+    # Felix 0.6.0-preview is published under gabloe; later releases publish under getfelix.
     image: ghcr.io/gabloe/felix-broker:0.6.0-preview
     environment:
       FELIX_CONTROLPLANE_URL: http://controlplane:8443

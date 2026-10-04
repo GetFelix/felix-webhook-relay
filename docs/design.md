@@ -1,6 +1,6 @@
 # Felix Webhook Relay design
 
-A self-hosted webhook relay whose entire backend is [Felix](https://github.com/gabloe/felix).
+A self-hosted webhook relay whose entire backend is [Felix](https://github.com/GetFelix/felix).
 It takes webhooks in over HTTP, stores them durably, delivers each one to its
 endpoints with retries and backoff, sets aside what keeps failing, and replays
 any endpoint from a point in time.
@@ -270,7 +270,7 @@ sequenceDiagram
 
 1. **Verify before anything is written.** The source names its scheme and secret. A bad signature or a timestamp outside five minutes is a `401`, and nothing reaches the log.
 2. **Check the idempotency key**, when the source has one. The key is the sender's event id, so a source has one when its config says where the sender puts it (`event_id`, a header or a JSON path). A hit answers `200` with the original offset and appends nothing. Senders that retry reuse their id, which is exactly what the key needs.
-3. **Append with an idempotent producer.** Felix's idempotent producer numbers each batch, so intake's own retry of a publish whose ack was lost lands once, across a failover (`crates/sdk/felix-client/src/publish/idempotent.rs`; `docs/semantics.md`, "Idempotent producers"). It also returns the offset on every ack, so the relay does not need the broker-wide `FELIX_ACK_ON_COMMIT` ([felix#956](https://github.com/gabloe/felix/issues/956)).
+3. **Append with an idempotent producer.** Felix's idempotent producer numbers each batch, so intake's own retry of a publish whose ack was lost lands once, across a failover (`crates/sdk/felix-client/src/publish/idempotent.rs`; `docs/semantics.md`, "Idempotent producers"). It also returns the offset on every ack, so the relay does not need the broker-wide `FELIX_ACK_ON_COMMIT` ([felix#956](https://github.com/GetFelix/felix/issues/956)).
 4. **Answer `202` only after the ack.** The ack is as durable as the broker's fsync policy (`docs/durable-storage.md`). The self-hosting guide recommends `FsyncMode::OnCommit`, where an ack means the bytes are on the device; group commit is what keeps that affordable.
 5. **Never cancel an append.** Dropping an idempotent publish after it was sent and before its answer ends the producer (`IdempotentProducer::publish_batch`), and an HTTP handler is dropped whenever the sender hangs up. So the append runs on its own task, and a sender that disconnects still gets its webhook stored. A failed append is re-sent with the same bytes a few times, which cannot duplicate it. If it still fails, intake answers `503` and starts a new producer: the old batch is in doubt, so the sender's retry can land a second copy, and the sender's id is what tells the two apart.
 
@@ -444,7 +444,7 @@ still works after retention trims the source.
 
 Two open Felix issues touch delivery directly.
 
-**[felix#962](https://github.com/gabloe/felix/issues/962): a restarted member
+**[felix#962](https://github.com/GetFelix/felix/issues/962): a restarted member
 cannot take back its predecessor's claims.** Claims carry no consumer
 identity, so a worker that restarts gets newer records first, and the records
 its previous run had claimed come back only when their claims lapse, up to
@@ -457,7 +457,7 @@ resumes where it was. The cost is a 30 s pause per endpoint on every restart
 and deploy. When #962 lands, the worker polls under a stable consumer
 identity, `<worker index>/<endpoint>`, and the wait goes away.
 
-**[felix#963](https://github.com/gabloe/felix/issues/963): group records do
+**[felix#963](https://github.com/GetFelix/felix/issues/963): group records do
 not say how many offsets were skipped.** The broker settles generation-start
 records and retention-trimmed records without delivering them, so a hole in
 the offsets a group hands out is not necessarily a loss. The relay therefore
@@ -561,7 +561,7 @@ sequenceDiagram
     R->>F: connect for acme with that token
 ```
 
-1. Each relay process holds an ID token for its service principal, read from `RELAY_IDP_TOKEN_FILE`. The plan was the client credentials grant, but Felix accepts only IdP ID tokens at the exchange and has no client-credentials path of its own ([felix#954](https://github.com/gabloe/felix/issues/954)), so whatever the deployment's IdP offers machines (client credentials, a workload identity, a sidecar) writes the file, and the relay reads it again before every exchange.
+1. Each relay process holds an ID token for its service principal, read from `RELAY_IDP_TOKEN_FILE`. The plan was the client credentials grant, but Felix accepts only IdP ID tokens at the exchange and has no client-credentials path of its own ([felix#954](https://github.com/GetFelix/felix/issues/954)), so whatever the deployment's IdP offers machines (client credentials, a workload identity, a sidecar) writes the file, and the relay reads it again before every exchange.
 2. For each tenant it serves, it exchanges that token at the Felix control plane with `{"requested": [actions], "resources": ["namespace:relay/<tenant>"]}`, narrowing to the tenant's namespace and to the actions its role needs: intake asks for `stream.publish`, `cache.read`, `cache.write`; delivery for `stream.subscribe` (which includes `group.consume`), `stream.publish`, `cache.read`, `cache.write`; admin adds `group.manage`, to redrive and discard Felix's group dead letters.
 3. The control plane cuts a `stream:relay/*/*` grant down to `stream:relay/<tenant>/*` (`services/felix-controlplane-service/src/auth/rbac/authorize.rs`, `narrow_object`). The narrowing survives refresh (`docs/auth.md`, refresh).
 4. The process opens one Felix connection per tenant with that token, through felix-client's `RefreshingToken`, which exchanges again before the token ends.
@@ -810,8 +810,8 @@ Every relay process reads these variables.
 
 Mirrors felix-canvas's packaging. [self-hosting.md](self-hosting.md) is the guide.
 
-- **One image**, `ghcr.io/gabloe/felix-webhook-relay`, multi-arch, built on native runners and signed like Felix's own images. `RELAY_ROLES` picks the roles. It also carries `deploy/seed.sh` as `relay-seed`, and the shell tools it needs, so the install pulls no other image of ours.
-- **A compose file** with the Felix broker and control plane at a pinned version, the control plane on its own Raft log rather than a database, the relay in all three roles, Dex as a stand-in for admins to sign in with, and a `tokens` service. Felix still needs an IdP to issue any token ([felix#954](https://github.com/gabloe/felix/issues/954)), so `tokens` is a minimal one for the relay's service accounts: it signs ID tokens with a key it makes, serves the JWKS, seeds Felix, and rewrites the relay's IdP token file before it expires. The relay already reads that file before every exchange, so nothing in the relay knows about it.
+- **One image**, `ghcr.io/getfelix/felix-webhook-relay`, multi-arch, built on native runners and signed like Felix's own images. `RELAY_ROLES` picks the roles. It also carries `deploy/seed.sh` as `relay-seed`, and the shell tools it needs, so the install pulls no other image of ours.
+- **A compose file** with the Felix broker and control plane at a pinned version, the control plane on its own Raft log rather than a database, the relay in all three roles, Dex as a stand-in for admins to sign in with, and a `tokens` service. Felix still needs an IdP to issue any token ([felix#954](https://github.com/GetFelix/felix/issues/954)), so `tokens` is a minimal one for the relay's service accounts: it signs ID tokens with a key it makes, serves the JWKS, seeds Felix, and rewrites the relay's IdP token file before it expires. The relay already reads that file before every exchange, so nothing in the relay knows about it.
 - **A Helm chart** with intake as a Deployment, delivery as a StatefulSet whose `apps.kubernetes.io/pod-index` label is `RELAY_WORKER_INDEX`, admin as a Deployment behind an ingress, and `tokens` writing the broker credential and the relay's IdP token to Secrets.
 - **A self-hosting guide** listing every variable, the IdP registration, the Felix roles each tenant needs, and the broker settings the relay depends on: retention longer than the disable window plus the replay window, `RELAY_CLAIM_WAIT_MS` equal to `FELIX_GROUP_VISIBILITY_TIMEOUT_MS`, and small segments, since every source is a stream that reserves one.
 
@@ -823,7 +823,7 @@ as with Dex on the compose network.
 
 A standalone 0.6.0-preview broker reads its node token once, so the dev stack
 sets `FELIX_EXCHANGE_TOKEN_TTL_SECONDS=86400` and the install 30 days, as
-felix-canvas does ([felix#955](https://github.com/gabloe/felix/issues/955)).
+felix-canvas does ([felix#955](https://github.com/GetFelix/felix/issues/955)).
 The dev stack also sets `FELIX_GROUP_VISIBILITY_TIMEOUT_MS=5000`, so tests see
 claims lapse while a worker retries, and a relay on it can use
 `RELAY_CLAIM_WAIT_MS=5000`.
@@ -846,8 +846,8 @@ real brokers.
 
 | Gap | Workaround here | Upstream |
 |---|---|---|
-| A restarted member cannot reclaim its predecessor's claims | Wait out the visibility timeout before the first poll | [felix#962](https://github.com/gabloe/felix/issues/962) |
-| Group records do not say how many offsets were skipped | Order by the polling rule; flag holes as "possibly trimmed" | [felix#963](https://github.com/gabloe/felix/issues/963) |
+| A restarted member cannot reclaim its predecessor's claims | Wait out the visibility timeout before the first poll | [felix#962](https://github.com/GetFelix/felix/issues/962) |
+| Group records do not say how many offsets were skipped | Order by the polling rule; flag holes as "possibly trimmed" | [felix#963](https://github.com/GetFelix/felix/issues/963) |
 | No claim extension and no delayed nack | Never poll while holding a lapsed claim; rely on a late ack being accepted | Not filed |
 | A consumer cannot dead-letter a record; attempts and timeout are broker-wide | The relay's own `dead` stream | Not filed |
 | A group cannot start at an offset, be reset, or report its cursor | `start_offset` in config, skipped with acks; lag from the worker's own report | Not filed |
@@ -861,7 +861,7 @@ real brokers.
 | A restarted broker generates a new self-signed certificate | The dev stack makes one certificate for every broker | By design (production brokers are given one) |
 | Segment size and preallocation are broker-wide, so each stream reserves a full segment | Document the disk cost per source; dev stack turns preallocation off | Not filed |
 | Streams and caches created only through the control plane | The admin role calls the REST API | By design |
-| Offsets on acks need a broker-wide setting | Idempotent producer returns them | [felix#956](https://github.com/gabloe/felix/issues/956) |
+| Offsets on acks need a broker-wide setting | Idempotent producer returns them | [felix#956](https://github.com/GetFelix/felix/issues/956) |
 
 **What this project would contribute upstream to Felix:**
 

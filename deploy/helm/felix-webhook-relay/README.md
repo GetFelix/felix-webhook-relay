@@ -1,14 +1,14 @@
 # felix-webhook-relay
 
 Felix Webhook Relay on Kubernetes, installed next to a release of the
-[felix chart](https://github.com/gabloe/felix/tree/main/deploy/helm/felix).
+[felix chart](https://github.com/GetFelix/felix/tree/main/deploy/helm/felix).
 
 | Component | Shape | Why |
 | --- | --- | --- |
 | Intake | Deployment, 2 replicas by default, Service, optional Ingress on `/in/` | It holds no state, so any replica takes any webhook |
 | Delivery | StatefulSet, Parallel, headless Service | The pod's ordinal is `RELAY_WORKER_INDEX`, and a StatefulSet never runs two pods with one ordinal |
 | Admin | Deployment, Service, optional Ingress | The page and the JSON API; every request is signed in |
-| `tokens` | Deployment of one, Service, and a Role that may write two Secrets | Seeds Felix at every install and upgrade, signs the relay's service accounts in because Felix issues tokens only in exchange for an IdP token ([felix#954](https://github.com/gabloe/felix/issues/954)), and keeps the relay's IdP token fresh in a Secret |
+| `tokens` | Deployment of one, Service, and a Role that may write two Secrets | Seeds Felix at every install and upgrade, signs the relay's service accounts in because Felix issues tokens only in exchange for an IdP token ([felix#954](https://github.com/GetFelix/felix/issues/954)), and keeps the relay's IdP token fresh in a Secret |
 
 [docs/self-hosting.md](../../../docs/self-hosting.md#kubernetes) has the
 install sequence, which interleaves this chart with the felix chart because

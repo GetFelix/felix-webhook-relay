@@ -8,6 +8,7 @@ name: felix-webhook-relay
 
 services:
   controlplane:
+    # Felix 0.6.0-preview is published under gabloe; later releases publish under getfelix.
     image: ghcr.io/gabloe/felix-controlplane:${FELIX_VERSION:-0.6.0-preview}
     environment:
       # The metadata lives in the control plane's own Raft log, so there is
@@ -55,7 +56,7 @@ services:
   # exchange for an IdP token (felix#954), so this signs the relay's service
   # accounts in itself. It has no published port.
   tokens:
-    image: ghcr.io/gabloe/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
+    image: ghcr.io/getfelix/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
     entrypoint: ["relay-seed", "serve"]
     # Root, to write the state volume, which Docker creates owned by root.
     user: "0:0"
@@ -84,6 +85,7 @@ services:
     restart: unless-stopped
 
   broker:
+    # Felix 0.6.0-preview is published under gabloe; later releases publish under getfelix.
     image: ghcr.io/gabloe/felix-broker:${FELIX_VERSION:-0.6.0-preview}
     environment:
       FELIX_CONTROLPLANE_URL: http://controlplane:8443
@@ -117,7 +119,7 @@ services:
     restart: unless-stopped
 
   relay:
-    image: ghcr.io/gabloe/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
+    image: ghcr.io/getfelix/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
     environment:
       RELAY_SECRET_KEY: ${RELAY_SECRET_KEY:?set RELAY_SECRET_KEY in .env}
       RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL}

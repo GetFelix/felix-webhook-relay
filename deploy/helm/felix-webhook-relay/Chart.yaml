@@ -10,6 +10,6 @@ version: 0.1.0
 appVersion: "0.1.0"
 # StatefulSet pods carry their ordinal as a label from 1.28.
 kubeVersion: ">=1.28.0-0"
-home: https://github.com/gabloe/felix-webhook-relay
+home: https://github.com/GetFelix/felix-webhook-relay
 sources:
-  - https://github.com/gabloe/felix-webhook-relay
+  - https://github.com/GetFelix/felix-webhook-relay

@@ -5,7 +5,7 @@
 <h1 align="center">Felix Webhook Relay</h1>
 
 <p align="center">
-  A self-hosted webhook relay built on <a href="https://github.com/gabloe/felix">Felix</a>.
+  A self-hosted webhook relay built on <a href="https://github.com/GetFelix/felix">Felix</a>.
 </p>
 
 Felix Webhook Relay sits between the services that send you webhooks and the
@@ -19,20 +19,20 @@ own services and want delivery they can inspect and replay on their own
 machines.
 
 Every webhook a source accepts is a record on a one-shard durable
-[stream](https://github.com/gabloe/felix/blob/main/docs/semantics.md), written
+[stream](https://github.com/GetFelix/felix/blob/main/docs/semantics.md), written
 through Felix's idempotent producer. Each endpoint reads that stream through
 its own
-[consumer group](https://github.com/gabloe/felix/blob/main/docs/projections.md#queues-read-the-log-through-a-shared-cursor),
+[consumer group](https://github.com/GetFelix/felix/blob/main/docs/projections.md#queues-read-the-log-through-a-shared-cursor),
 which gives it a cursor, acknowledgements and redelivery, so a backlog is the
 part of the log its cursor has not reached. Replay is a read of the same
 stream from an earlier offset. Configuration, idempotency keys and endpoint
 health are
-[cache](https://github.com/gabloe/felix/blob/main/docs/cache-on-log.md) entries,
+[cache](https://github.com/GetFelix/felix/blob/main/docs/cache-on-log.md) entries,
 the idempotency keys with a TTL, and the dashboard's counts are
-[counters](https://github.com/gabloe/felix/blob/main/docs/projections.md#counters).
+[counters](https://github.com/GetFelix/felix/blob/main/docs/projections.md#counters).
 Each relay tenant is a Felix namespace, reached only with tokens the control
 plane
-[narrows](https://github.com/gabloe/felix/blob/main/docs/auth.md#control-plane-token-exchange-flow)
+[narrows](https://github.com/GetFelix/felix/blob/main/docs/auth.md#control-plane-token-exchange-flow)
 to it, and a source's stream can be replicated across brokers so a broker can
 fail without losing what was acknowledged.
 
@@ -67,7 +67,7 @@ with a Felix broker and control plane and nothing else, plus Dex as a stand-in
 sign-in for a first run:
 
 ```bash
-git clone --depth 1 https://github.com/gabloe/felix-webhook-relay
+git clone --depth 1 https://github.com/GetFelix/felix-webhook-relay
 cd felix-webhook-relay/deploy/compose
 sed -i.bak "s|^RELAY_SECRET_KEY=.*|RELAY_SECRET_KEY=$(openssl rand -base64 32)|" .env
 docker compose up -d --wait
@@ -140,14 +140,14 @@ conditions, is in [docs/performance.md](docs/performance.md).
 
 | M | Milestone | Status |
 |---|---|---|
-| [0](https://github.com/gabloe/felix-webhook-relay/milestone/1) | One source, one endpoint, through Felix | Done |
-| [1](https://github.com/gabloe/felix-webhook-relay/milestone/2) | Signatures in and out, idempotency keys | Done |
-| [2](https://github.com/gabloe/felix-webhook-relay/milestone/3) | Retries, pausing, backoff, dead letters | Done |
-| [3](https://github.com/gabloe/felix-webhook-relay/milestone/4) | Many sources and endpoints, ordered and unordered | Done |
-| [4](https://github.com/gabloe/felix-webhook-relay/milestone/5) | Replay and redrive | Done |
-| [5](https://github.com/gabloe/felix-webhook-relay/milestone/6) | Tenants, narrowed tokens, the admin page | Done |
-| [6](https://github.com/gabloe/felix-webhook-relay/milestone/7) | Crash and failover tests, performance targets | Done |
-| [7](https://github.com/gabloe/felix-webhook-relay/milestone/8) | Images, compose, Helm, a self-hosting guide | Done |
+| [0](https://github.com/GetFelix/felix-webhook-relay/milestone/1) | One source, one endpoint, through Felix | Done |
+| [1](https://github.com/GetFelix/felix-webhook-relay/milestone/2) | Signatures in and out, idempotency keys | Done |
+| [2](https://github.com/GetFelix/felix-webhook-relay/milestone/3) | Retries, pausing, backoff, dead letters | Done |
+| [3](https://github.com/GetFelix/felix-webhook-relay/milestone/4) | Many sources and endpoints, ordered and unordered | Done |
+| [4](https://github.com/GetFelix/felix-webhook-relay/milestone/5) | Replay and redrive | Done |
+| [5](https://github.com/GetFelix/felix-webhook-relay/milestone/6) | Tenants, narrowed tokens, the admin page | Done |
+| [6](https://github.com/GetFelix/felix-webhook-relay/milestone/7) | Crash and failover tests, performance targets | Done |
+| [7](https://github.com/GetFelix/felix-webhook-relay/milestone/8) | Images, compose, Helm, a self-hosting guide | Done |
 
 ## Documentation
 
