@@ -81,7 +81,7 @@ Every `docker` command here works as `podman`, `docker compose` as
 - On SELinux hosts, bind mounts need a relabel: `ro,z` on the compose
   file's `dex.yaml` mount, and `-v "$PWD":/out:Z` in the backup command.
 
-[Docker or Podman](https://getfelix.github.io/felix/getting-started/containers/)
+[Docker or Podman](https://docs.getfelix.dev/getting-started/containers/)
 in the Felix docs has the rest.
 
 ## Your own identity provider

@@ -75,7 +75,7 @@ docker compose up -d --wait
 
 With Podman, run `podman compose up -d --wait` instead (after
 `podman machine start` on macOS). [Docker or
-Podman](https://getfelix.github.io/felix/getting-started/containers/) covers
+Podman](https://docs.getfelix.dev/getting-started/containers/) covers
 the differences.
 
 Open <http://127.0.0.1:8090/admin/acme> and sign in as `alice@example.com` with
