@@ -8,6 +8,21 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Docker or Podman: CONTAINER_ENGINE if set, else Docker when its daemon
+# answers, else Podman.
+engine="${CONTAINER_ENGINE:-}"
+if [[ -z "$engine" ]]; then
+  if docker info >/dev/null 2>&1; then
+    engine=docker
+  elif command -v podman >/dev/null 2>&1; then
+    engine=podman
+  else
+    echo "no container engine: start Docker, or install Podman (and run podman machine start on macOS)" >&2
+    exit 1
+  fi
+fi
+compose=("$engine" compose)
+
 files=(-f docker-compose.yml)
 health=(8080)
 case "${1:-}" in
@@ -18,11 +33,11 @@ case "${1:-}" in
   --retention) files+=(-f docker-compose.retention.yml) ;;
 esac
 
-docker compose -f docker-compose.yml -f docker-compose.cluster.yml down --volumes --remove-orphans >/dev/null 2>&1 || true
+"${compose[@]}" -f docker-compose.yml -f docker-compose.cluster.yml down --volumes --remove-orphans >/dev/null 2>&1 || true
 rm -f state/broker-*.pem 2>/dev/null || true
 mkdir -p state/idp
-if ! docker compose "${files[@]}" up --detach; then
-  docker compose "${files[@]}" logs >&2
+if ! "${compose[@]}" "${files[@]}" up --detach; then
+  "${compose[@]}" "${files[@]}" logs >&2
   exit 1
 fi
 
@@ -44,6 +59,6 @@ for _ in $(seq 1 90); do
 done
 
 echo "the brokers did not become ready" >&2
-docker compose "${files[@]}" ps --all >&2
-docker compose "${files[@]}" logs >&2
+"${compose[@]}" "${files[@]}" ps --all >&2
+"${compose[@]}" "${files[@]}" logs >&2
 exit 1

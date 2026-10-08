@@ -10,7 +10,7 @@ mod common;
 
 use std::collections::{HashMap, HashSet};
 use std::net::TcpListener;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,9 +31,24 @@ fn free_port() -> String {
     addr.to_string()
 }
 
-fn docker(args: &[&str]) {
-    let status = Command::new("docker").args(args).status().unwrap();
-    assert!(status.success(), "docker {args:?}");
+/// The engine `dev/up.sh` picks: `CONTAINER_ENGINE`, else Docker when its
+/// daemon answers, else Podman.
+fn container_engine() -> String {
+    if let Ok(engine) = std::env::var("CONTAINER_ENGINE") {
+        return engine;
+    }
+    let docker_up = Command::new("docker")
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if docker_up { "docker" } else { "podman" }.to_string()
+}
+
+fn container(engine: &str, args: &[&str]) {
+    let status = Command::new(engine).args(args).status().unwrap();
+    assert!(status.success(), "{engine} {args:?}");
 }
 
 /// A relay role on a fixed port, so a replacement takes over its address.
@@ -161,13 +176,14 @@ async fn nothing_acknowledged_is_lost_when_anything_is_killed() {
     eprintln!("kill -9 the delivery worker");
     drop(deliver_relay.take());
     deliver_relay = Some(deliver.start().await);
+    let engine = container_engine();
     for broker in ["broker-1", "broker-2-1", "broker-3-1"] {
         pause(8).await;
-        let container = format!("felix-webhook-relay-{broker}");
-        eprintln!("kill -9 {container}");
-        docker(&["kill", "--signal", "KILL", &container]);
+        let name = format!("felix-webhook-relay-{broker}");
+        eprintln!("kill -9 {name}");
+        container(&engine, &["kill", "--signal", "KILL", &name]);
         pause(8).await;
-        docker(&["start", &container]);
+        container(&engine, &["start", &name]);
     }
     pause(10).await;
     stop.store(true, Ordering::SeqCst);

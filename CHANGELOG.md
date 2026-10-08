@@ -10,6 +10,8 @@ Each release's section is its GitHub release notes.
   brokers no longer need a restart within `FELIX_TOKEN_TTL_SECONDS`.
 - `FELIX_OIDC_ALGORITHMS` is gone: Felix now accepts RS256 ID tokens by
   default.
+- `dev/up.sh` and the crash test run on Docker or Podman, and the docs show
+  the Podman commands.
 
 ## [0.1.0]
 
