@@ -33,15 +33,22 @@ the idempotency keys with a TTL, and the dashboard's counts are
 Each relay tenant is a Felix namespace, reached only with tokens the control
 plane
 [narrows](https://github.com/GetFelix/felix/blob/main/docs/auth.md#control-plane-token-exchange-flow)
-to it, and a source's stream can be replicated across brokers so a broker can
-fail without losing what was acknowledged.
+to it. A source's stream can be replicated across brokers so a broker can
+fail without losing what was acknowledged, but the compose install runs one
+broker and sets `RELAY_STREAM_REPLICAS=1`, so there it has a single copy. With
+three or more brokers, the Helm chart's `felix.replicas: 3` puts every stream
+and cache on three of them ([docs/self-hosting.md](docs/self-hosting.md)).
 
 ## Features
 
 - Intake over HTTP that verifies Standard Webhooks, GitHub, Stripe and generic
   HMAC signatures before anything is stored, and answers `202` only once the
   webhook is durable.
-- Deduplication of sender retries on the sender's event id.
+- Best-effort deduplication of sender retries on the sender's event id. Intake
+  checks the id before the append and records it after, so a retry after a
+  timeout is caught, but two copies arriving at once, or a crash between the
+  append and recording the id, can store a duplicate. Receivers should still
+  dedupe on `webhook-id`.
 - Delivery signed with Standard Webhooks, so receivers verify with an existing
   library.
 - Ordered delivery per endpoint, or unordered with a window of requests in
@@ -69,9 +76,17 @@ Dex as a stand-in sign-in for a first run:
 ```bash
 git clone --depth 1 https://github.com/GetFelix/felix-webhook-relay
 cd felix-webhook-relay/deploy/compose
-sed -i.bak "s|^RELAY_SECRET_KEY=.*|RELAY_SECRET_KEY=$(openssl rand -base64 32)|" .env
+sed -i.bak \
+  -e "s|^FELIX_BOOTSTRAP_TOKEN=.*|FELIX_BOOTSTRAP_TOKEN=$(openssl rand -base64 32)|" \
+  -e "s|^FELIX_RAFT_PEER_TOKEN=.*|FELIX_RAFT_PEER_TOKEN=$(openssl rand -base64 32)|" \
+  -e "s|^RELAY_SECRET_KEY=.*|RELAY_SECRET_KEY=$(openssl rand -base64 32)|" .env
 docker compose up -d --wait
 ```
+
+The `sed` line sets the three secrets `.env` asks for before the first start:
+the Felix bootstrap token, the Raft peer token and the key that seals the
+relay's stored secrets. Keep `.env`; without `RELAY_SECRET_KEY` the stored
+secrets cannot be opened.
 
 With Podman, run `podman compose up -d --wait` instead (after
 `podman machine start` on macOS). [Docker or
@@ -104,8 +119,8 @@ curl -i -H 'content-type: application/json' -d '{"hello":"world"}' \
   http://127.0.0.1:8090/in/acme/demo/<token>
 ```
 
-Before anyone else can reach it, change the tokens in `.env` and sign admins
-in with your own provider. [docs/self-hosting.md](docs/self-hosting.md) covers
+Before anyone else can reach it, sign admins in with your own provider instead
+of the stand-in Dex. [docs/self-hosting.md](docs/self-hosting.md) covers
 that, the Helm chart, and every setting.
 [Configuration](docs/design.md#configuration) lists the signature schemes and
 the endpoint options.
@@ -159,6 +174,7 @@ conditions, is in [docs/performance.md](docs/performance.md).
 - [docs/design.md](docs/design.md): the architecture, Felix layout, delivery semantics, replay, signing, multi-tenancy, the admin API and configuration.
 - [docs/self-hosting.md](docs/self-hosting.md): the compose install, the Helm chart, your own identity provider, the broker settings the relay depends on, backups and upgrades.
 - [docs/performance.md](docs/performance.md): measured results for each performance target, with their conditions.
+- [Webhook relay](https://docs.getfelix.dev/built-on-felix/webhook-relay/) in the Felix docs: how the relay uses Felix.
 
 ## Contributing
 
