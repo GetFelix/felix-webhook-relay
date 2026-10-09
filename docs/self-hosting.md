@@ -30,8 +30,8 @@ cosign verify ghcr.io/getfelix/felix-webhook-relay:0.1.0 \
 
 ## Install with Docker Compose
 
-You need Docker with Compose 2.20 or later, about 2 cores and 2 GB of memory,
-and disk for the webhooks. Each source is a Felix stream, and each stream
+You need Docker or Podman with Compose 2.20 or later, about 2 cores and 2 GB
+of memory, and disk for the webhooks. Each source is a Felix stream, and each stream
 reserves a log segment up front (`FELIX_SEGMENT_BYTES`, 16 MiB here), so a
 source costs 16 MiB before its first webhook.
 
@@ -65,6 +65,24 @@ CI runs it against the install on every pull request.
 
 `docker compose logs -f relay` shows the relay, and `docker compose ps` shows
 what is healthy.
+
+### With Podman
+
+Every `docker` command here works as `podman`, `docker compose` as
+`podman compose`. Where they differ:
+
+- `podman compose` runs a compose provider. Use `docker-compose` 2.20 or
+  later as the provider; the compose file is tested with it, not with
+  `podman-compose`.
+- On macOS, `podman machine start` first.
+- Rootless Podman on Linux cannot publish ports below 1024, which matters for
+  the Caddy proxy's 80 and 443 below. Lower
+  `net.ipv4.ip_unprivileged_port_start` or run that proxy rootful.
+- On SELinux hosts, bind mounts need a relabel: `ro,z` on the compose
+  file's `dex.yaml` mount, and `-v "$PWD":/out:Z` in the backup command.
+
+[Docker or Podman](https://docs.getfelix.dev/getting-started/containers/)
+in the Felix docs has the rest.
 
 ## Your own identity provider
 
@@ -150,7 +168,7 @@ To take webhooks from the internet:
    ```yaml
    services:
      proxy:
-       image: caddy:2
+       image: docker.io/library/caddy:2
        command: caddy reverse-proxy --from relay.example.com --to relay:8090
        ports: ["80:80", "443:443"]
        volumes: [caddy-data:/data]
@@ -212,7 +230,7 @@ docker compose stop relay broker controlplane
 docker run --rm -v "$PWD":/out \
   -v felix-webhook-relay_controlplane-data:/backup/controlplane \
   -v felix-webhook-relay_felix-data:/backup/broker \
-  debian:bookworm-slim tar czf /out/relay-backup.tar.gz -C /backup controlplane broker
+  docker.io/library/debian:bookworm-slim tar czf /out/relay-backup.tar.gz -C /backup controlplane broker
 docker compose up -d
 ```
 

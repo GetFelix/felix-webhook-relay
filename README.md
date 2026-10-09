@@ -62,9 +62,9 @@ fail without losing what was acknowledged.
 
 ## Quick start
 
-You need Docker with Compose 2.20 or later. The compose install runs the relay
-with a Felix broker and control plane and nothing else, plus Dex as a stand-in
-sign-in for a first run:
+You need Docker or Podman, with Compose 2.20 or later. The compose install
+runs the relay with a Felix broker and control plane and nothing else, plus
+Dex as a stand-in sign-in for a first run:
 
 ```bash
 git clone --depth 1 https://github.com/GetFelix/felix-webhook-relay
@@ -72,6 +72,11 @@ cd felix-webhook-relay/deploy/compose
 sed -i.bak "s|^RELAY_SECRET_KEY=.*|RELAY_SECRET_KEY=$(openssl rand -base64 32)|" .env
 docker compose up -d --wait
 ```
+
+With Podman, run `podman compose up -d --wait` instead (after
+`podman machine start` on macOS). [Docker or
+Podman](https://docs.getfelix.dev/getting-started/containers/) covers
+the differences.
 
 Open <http://127.0.0.1:8090/admin/acme> and sign in as `alice@example.com` with
 the password `password`. The page creates sources and endpoints, shows health,
@@ -160,7 +165,9 @@ conditions, is in [docs/performance.md](docs/performance.md).
 [CONTRIBUTING.md](CONTRIBUTING.md) describes how code, comments and pull
 requests should read. Unit tests need neither Docker nor a broker. The
 integration tests run against the dev stack, and `dev/up.sh --cluster` and
-`dev/up.sh --retention` start the stacks for the crash and retention tests:
+`dev/up.sh --retention` start the stacks for the crash and retention tests.
+`dev/up.sh` uses Docker when its daemon is running and Podman otherwise; set
+`CONTAINER_ENGINE=podman` to choose:
 
 ```bash
 cargo test
