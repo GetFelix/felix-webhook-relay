@@ -296,7 +296,8 @@ The last rule is the one the whole design rests on, and the reason is the
 claim timer. A claimed record lapses after `FELIX_GROUP_VISIBILITY_TIMEOUT_MS`
 (30 s by default) and becomes owed again, and the next poll hands owed records
 out first, counting another attempt (`tracker.rs`, `claim` and `expire`).
-Felix has no way to extend a claim and no delayed nack. So a worker that is
+The pinned Felix (0.6.0-preview.2) has no way to extend a claim and no delayed
+nack; newer Felix adds `group_extend` and `group_nack_after`. So a worker that is
 retrying a record past 30 s simply does not poll: nothing else reads its group,
 the lapsed claim sits owed, and the attempt count does not move. When the
 record finally succeeds, the worker acknowledges it. Felix accepts an
@@ -848,7 +849,7 @@ real brokers.
 |---|---|---|
 | A restarted member cannot reclaim its predecessor's claims | Wait out the visibility timeout before the first poll | [felix#962](https://github.com/GetFelix/felix/issues/962) |
 | Group records do not say how many offsets were skipped | Order by the polling rule; flag holes as "possibly trimmed" | [felix#963](https://github.com/GetFelix/felix/issues/963) |
-| No claim extension and no delayed nack | Never poll while holding a lapsed claim; rely on a late ack being accepted | Not filed |
+| No claim extension and no delayed nack in the pinned 0.6.0-preview.2 | Never poll while holding a lapsed claim; rely on a late ack being accepted | Fixed in newer Felix (`group_extend`, `group_nack_after`) |
 | A consumer cannot dead-letter a record; attempts and timeout are broker-wide | The relay's own `dead` stream | Not filed |
 | A group cannot start at an offset, be reset, or report its cursor | `start_offset` in config, skipped with acks; lag from the worker's own report | Not filed |
 | No consumer group deletion | Leave idle groups behind | Not filed |
