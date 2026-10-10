@@ -8,7 +8,7 @@ name: felix-webhook-relay
 
 services:
   controlplane:
-    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.0-preview.2}
+    image: ghcr.io/getfelix/felix-controlplane:${FELIX_VERSION:-0.6.0-preview.4}
     environment:
       # The metadata lives in the control plane's own Raft log, so there is
       # no database beside Felix. One member is a group of one.
@@ -81,7 +81,7 @@ services:
     restart: unless-stopped
 
   broker:
-    image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.6.0-preview.2}
+    image: ghcr.io/getfelix/felix-broker:${FELIX_VERSION:-0.6.0-preview.4}
     environment:
       FELIX_CONTROLPLANE_URL: http://controlplane:8443
       FELIX_NODE_TOKEN_FILE: /state/node.token
