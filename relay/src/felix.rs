@@ -314,9 +314,9 @@ async fn appender(
 
 /// Publish one batch, re-sending it a few times, and return its first offset.
 /// The records of a batch land together, at consecutive offsets.
-async fn publish_batch<'a>(
-    client: &'a ClusterClient,
-    producer: &mut Option<IdempotentProducer<'a>>,
+async fn publish_batch(
+    client: &Arc<ClusterClient>,
+    producer: &mut Option<IdempotentProducer>,
     tenant: &str,
     namespace: &str,
     stream: &str,

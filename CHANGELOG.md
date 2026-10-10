@@ -4,8 +4,10 @@ Each release's section is its GitHub release notes.
 
 ## Unreleased
 
-- Runs on Felix 0.6.0-preview.2, from `ghcr.io/getfelix`, and its client
-  crates.
+- Built on Felix 0.6.0-preview.4: the client crates, the compose files' and
+  CI's images, and the Felix chart the self-hosting guide installs. Felix now
+  has claim extension and delayed nacks; the relay does not use them yet
+  ([#62](https://github.com/GetFelix/felix-webhook-relay/issues/62)).
 - The `tokens` service renews the broker's token along with the relay's, so
   brokers no longer need a restart within `FELIX_TOKEN_TTL_SECONDS`.
 - `FELIX_OIDC_ALGORITHMS` is gone: Felix now accepts RS256 ID tokens by

@@ -23,7 +23,7 @@ services:
       - "127.0.0.1:5556:5556"
 
   controlplane:
-    image: ghcr.io/getfelix/felix-controlplane:0.6.0-preview.2
+    image: ghcr.io/getfelix/felix-controlplane:0.6.0-preview.4
     environment:
       # In-memory store: a restart of the stack starts from nothing.
       FELIX_BOOTSTRAP_ENABLED: "true"
@@ -65,7 +65,7 @@ services:
         condition: service_started
 
   broker:
-    image: ghcr.io/getfelix/felix-broker:0.6.0-preview.2
+    image: ghcr.io/getfelix/felix-broker:0.6.0-preview.4
     environment:
       FELIX_CONTROLPLANE_URL: http://controlplane:8443
       FELIX_NODE_TOKEN_FILE: /state/node.token

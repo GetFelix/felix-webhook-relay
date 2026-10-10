@@ -5,10 +5,10 @@
 //!
 //! The task never polls while it holds an unsettled record. Felix hands out
 //! lapsed claims first, so holding one while polling again would let a later
-//! record overtake it, and the pinned felix-client (0.6.0-preview.2) cannot
-//! extend a claim or delay a nack. Newer Felix has `group_extend` and
-//! `group_nack_after` for that. So a record that is still being retried after
-//! its claim lapsed simply stays in hand; the late acknowledgement settles it.
+//! record overtake it. A record that is still being retried after its claim
+//! lapsed simply stays in hand; the late acknowledgement settles it. Felix
+//! 0.6.0-preview.4 can extend a claim (`group_extend`) and delay a nack
+//! (`group_nack_after`); using them is #62.
 
 use std::sync::Arc;
 use std::time::Duration;
