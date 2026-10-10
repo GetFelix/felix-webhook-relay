@@ -8,6 +8,7 @@
 mod common;
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -93,7 +94,12 @@ async fn latencies(run: &str, fast: usize, slow: usize) -> Vec<Duration> {
 async fn a_slow_endpoint_does_not_delay_the_others() {
     let alone = p99(latencies(&unique("alone"), 3, 0).await);
     let beside = p99(latencies(&unique("beside"), 3, 1).await);
-    println!("p99 to the fast endpoints: {alone:?} alone, {beside:?} beside a 10 s endpoint");
+    // Straight to stderr rather than println!, which the test harness
+    // swallows for a passing test: passing runs are the baseline.
+    let _ = writeln!(
+        std::io::stderr(),
+        "p99 to the fast endpoints: {alone:?} alone, {beside:?} beside a 10 s endpoint"
+    );
     // 10% is the target; the 10 ms floor keeps scheduler noise on a shared
     // CI runner from failing a millisecond-scale comparison.
     assert!(
