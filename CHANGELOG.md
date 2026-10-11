@@ -5,8 +5,11 @@ Each release's section is its GitHub release notes.
 ## Unreleased
 
 - Built on Felix 0.6.0-preview.4: the client crates, the compose files' and
-  CI's images, and the Felix chart the self-hosting guide installs. Felix now
-  has claim extension and delayed nacks; the relay does not use them yet
+  CI's images, and the Felix chart the self-hosting guide installs.
+- A delivery worker extends the claims of records it is still retrying, so a
+  long retry no longer leaves its record owed to the group. An unordered
+  endpoint hands a refused record back with a delay and keeps delivering the
+  rest of its window while it waits
   ([#62](https://github.com/GetFelix/felix-webhook-relay/issues/62)).
 - The `tokens` service renews the broker's token along with the relay's, so
   brokers no longer need a restart within `FELIX_TOKEN_TTL_SECONDS`.

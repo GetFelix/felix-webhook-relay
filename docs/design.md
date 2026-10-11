@@ -296,20 +296,40 @@ The last rule is the one the whole design rests on, and the reason is the
 claim timer. A claimed record lapses after `FELIX_GROUP_VISIBILITY_TIMEOUT_MS`
 (30 s by default) and becomes owed again, and the next poll hands owed records
 out first, counting another attempt (`tracker.rs`, `claim` and `expire`).
-The relay does not extend a claim or delay a nack, so a worker that is
-retrying a record past 30 s simply does not poll: nothing else reads its group,
-the lapsed claim sits owed, and the attempt count does not move. When the
-record finally succeeds, the worker acknowledges it. Felix accepts an
-acknowledgement after the claim lapsed and settles the record
-(`tracker.rs`, `GroupTracker::ack`, "Acknowledging something already settled
-is not an error").
+Polling while holding a record would let a later one overtake it.
 
-Felix 0.6.0-preview.4 added both: `group_extend` keeps a claim alive, and
-`group_nack_after` hands a record back after a delay. The relay does not use
-them yet ([#62](https://github.com/GetFelix/felix-webhook-relay/issues/62)).
-With them, a retrying worker would keep its claim instead of letting it lapse,
-and an unordered endpoint could release a record into its backoff and keep
-delivering others.
+So a worker keeps the claims it holds. Once a claim has less than half of
+`RELAY_CLAIM_WAIT_MS` left, the worker extends it by `RELAY_CLAIM_WAIT_MS`
+with `group_extend` (`relay/src/deliver/claims.rs`). A record retried for
+minutes stays claimed rather than owed, and a worker that dies leaves claims
+that lapse within one claim length, which the next worker's claim wait covers.
+
+An unordered endpoint does not hold a refused record through its retry wait.
+It hands the record back with `group_nack_after(record, wait)` and goes on
+polling and delivering the rest; Felix hands it out again when the wait ends.
+The worker remembers the record's tries and refusals until it comes back. An
+endpoint that is paused as a whole holds its records and extends them, as an
+ordered endpoint does, since polling then would only fetch more records for an
+endpoint that is down.
+
+A claim can still lapse: an extension is the shard leader's memory, so a
+failover drops it. The worker then keeps the record in hand and does not
+poll, so nothing else takes it, and Felix accepts the acknowledgement after
+the claim lapsed (`tracker.rs`, `GroupTracker::ack`, "Acknowledging something
+already settled is not an error"). The same holds against a broker without
+`FEATURE_GROUP_CLAIM_CONTROL` (before 0.6.0-preview.4), where the worker only
+holds records.
+
+**Attempts.** Felix counts an attempt each time it hands a record out, a
+redelivery after `group_nack_after` included, and gives up on a record at
+`FELIX_GROUP_MAX_ATTEMPTS` (default 5). A record refused under the default
+`RELAY_REFUSED_RETRIES` is handed out at most three times, so the relay's
+budget runs out first and the record lands in the relay's `dead` stream with
+the response that caused it. Keep the number of `RELAY_REFUSED_RETRIES`
+entries below `FELIX_GROUP_MAX_ATTEMPTS` minus one. A worker that restarts
+while a record is backing off forgets its refusals and starts the count again,
+while Felix's count goes on, so a crash in that window can send the record to
+Felix's dead-letter list instead.
 
 ### Ordered and unordered endpoints
 
@@ -322,9 +342,9 @@ Ordered is the default because it is the property the usual stack cannot give
 cheaply and the one most receivers quietly assume. An endpoint that does not
 care sets `unordered` and gets a window of concurrent requests. Both modes
 follow the polling rule above, so an unordered endpoint works in rounds: it
-polls a window, sends it all at once, settles what it can, and sends the rest
-again after the longest wait any of them asked for, polling only once the
-whole window is settled. An ordered endpoint is the same loop with a window of
+polls a window, sends it all at once, settles what it can, hands refused
+records back to wait out their retry, and polls again. When the whole window
+failed, the endpoint pauses and probes with the window it holds. An ordered endpoint is the same loop with a window of
 one record, which keeps a single delivery path for both.
 
 **Endpoints are assigned statically.** Each delivery process is started with
@@ -809,7 +829,7 @@ Every relay process reads these variables.
 | `RELAY_ENDPOINT_PREFIXES` | all | Comma-separated; only endpoints whose ids start with one of these |
 | `RELAY_CLAIM_WAIT_MS` | `30000` | Wait before the first poll; at least the broker's `FELIX_GROUP_VISIBILITY_TIMEOUT_MS` (5000 on the dev stack) |
 | `RELAY_BACKOFF` | `5s,15s,1m,2m,5m` | Waits between probes of a paused endpoint; the last repeats |
-| `RELAY_REFUSED_RETRIES` | `5s,30s` | Waits before each retry of a refused record, then it is dead-lettered |
+| `RELAY_REFUSED_RETRIES` | `5s,30s` | Waits before each retry of a refused record, then it is dead-lettered. Fewer entries than `FELIX_GROUP_MAX_ATTEMPTS` minus one |
 | `RELAY_DISABLE_AFTER` | `72h` | How long an endpoint may fail without a break before it is disabled |
 | `RELAY_WORKER_NAME` | host name and pid | Names this process in endpoint health entries |
 
@@ -855,7 +875,7 @@ real brokers.
 |---|---|---|
 | A restarted member cannot reclaim its predecessor's claims | Wait out the visibility timeout before the first poll | [felix#962](https://github.com/GetFelix/felix/issues/962) |
 | Group records do not say how many offsets were skipped | Order by the polling rule; flag holes as "possibly trimmed" | [felix#963](https://github.com/GetFelix/felix/issues/963) |
-| No claim extension and no delayed nack before Felix 0.6.0-preview.4 | Never poll while holding a lapsed claim; rely on a late ack being accepted | Fixed in 0.6.0-preview.4 (`group_extend`, `group_nack_after`); adopting them is [#62](https://github.com/GetFelix/felix-webhook-relay/issues/62) |
+| A claim extension or delayed nack does not survive a failover | Never poll while holding a lapsed claim; rely on a late ack being accepted | By design (the leader's memory) |
 | A consumer cannot dead-letter a record; attempts and timeout are broker-wide | The relay's own `dead` stream | Not filed |
 | A group cannot start at an offset, be reset, or report its cursor | `start_offset` in config, skipped with acks; lag from the worker's own report | Not filed |
 | No consumer group deletion | Leave idle groups behind | Not filed |

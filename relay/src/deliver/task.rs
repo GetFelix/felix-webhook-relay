@@ -3,13 +3,17 @@
 //! endpoint takes it, when it is dead-lettered after the endpoint refused it
 //! for good, or when the endpoint does not want it at all.
 //!
-//! The task never polls while it holds an unsettled record. Felix hands out
-//! lapsed claims first, so holding one while polling again would let a later
-//! record overtake it. A record that is still being retried after its claim
-//! lapsed simply stays in hand; the late acknowledgement settles it. Felix
-//! 0.6.0-preview.4 can extend a claim (`group_extend`) and delay a nack
-//! (`group_nack_after`); using them is #62.
+//! An ordered endpoint's task never polls while it holds an unsettled record:
+//! Felix hands out lapsed claims first, so polling again would let a later
+//! record overtake it. The claims of records in hand are extended while they
+//! are retried. An unordered endpoint hands a record it will retry back to
+//! the group with `group_nack_after`, and keeps polling while it waits.
+//!
+//! Against a broker without claim control the task only holds records. A
+//! claim then lapses during a long retry, and the late acknowledgement
+//! settles the record.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,8 +22,11 @@ use felix_client::ClusterClient;
 use felix_relay_core::Envelope;
 use felix_relay_core::catalog::{Disabled, Endpoint, Mode, endpoint_key};
 use felix_relay_core::health::{Decision, Health, Outcome, State};
+use felix_wire::GroupRecord;
 use futures_util::future::join_all;
+use tokio::time::Instant;
 
+use super::claims::{self, Claims, Group};
 use super::job::save;
 use super::send::{Answer, FELIX_RETRY, Sender, jitter};
 use crate::catalog::CONFIG;
@@ -36,6 +43,8 @@ const POLL_WAIT: Duration = Duration::from_secs(10);
 /// A record in hand, not yet settled.
 struct Held {
     offset: u64,
+    /// The delivery Felix handed out, without its payload.
+    claim: GroupRecord,
     id: String,
     envelope: Envelope,
     tries: u32,
@@ -57,6 +66,10 @@ pub(super) struct Task {
     /// Set between deciding to disable the endpoint and seeing that in config.
     disabling: bool,
     last_offset: Option<u64>,
+    /// `None` when the broker cannot extend claims or delay nacks.
+    claims: Option<Claims>,
+    /// Tries and refusals of records handed back to wait out a retry.
+    backing_off: HashMap<u64, (u32, usize)>,
 }
 
 impl Task {
@@ -85,6 +98,8 @@ impl Task {
             health: Health::default(),
             disabling: false,
             last_offset: None,
+            claims: None,
+            backing_off: HashMap::new(),
             tenant,
             app,
         }
@@ -102,12 +117,22 @@ impl Task {
         // then would hand out newer records ahead of them.
         tokio::time::sleep(self.app.config.claim_wait).await;
         let felix = Arc::clone(&self.tenant.felix);
+        if self.felix().client().await.supports_group_claim_control() {
+            let group = Group {
+                felix: Arc::clone(&felix),
+                endpoint: self.endpoint.clone(),
+                stream: self.stream.clone(),
+                group: self.group.clone(),
+            };
+            self.claims = Some(Claims::start(group, self.app.config.claim_wait));
+        }
         let batch = match self.mode {
             Mode::Ordered => ORDERED_BATCH,
             Mode::Unordered => self.window,
         };
         loop {
             self.wait_for_jobs_that_pause_live().await?;
+            let claimed = Instant::now();
             let polled = self
                 .felix()
                 .group_poll_wait(
@@ -136,9 +161,15 @@ impl Task {
             let mut wanted = Vec::new();
             let mut skipped = Vec::new();
             for record in records {
-                match self.take(record.offset, &record.payload, polled_at).await? {
-                    Some(held) => wanted.push(held),
-                    None => skipped.push(record.offset),
+                let offset = record.offset;
+                match self.take(record, polled_at).await? {
+                    Some(held) => {
+                        if let Some(claims) = &self.claims {
+                            claims.hold(&held.claim, claimed);
+                        }
+                        wanted.push(held);
+                    }
+                    None => skipped.push(offset),
                 }
             }
             // Records it does not want, or that predate it, settle together:
@@ -169,14 +200,17 @@ impl Task {
     }
 
     /// A polled record to send, or `None` for one to acknowledge unsent.
-    async fn take(&mut self, offset: u64, payload: &[u8], polled_at: u64) -> Result<Option<Held>> {
+    async fn take(&mut self, mut record: GroupRecord, polled_at: u64) -> Result<Option<Held>> {
+        let offset = record.offset;
         if let Some(last) = self.last_offset
             && offset > last + 1
         {
             self.reporter.gap(last + 1, offset - 1);
         }
-        self.last_offset = Some(offset);
-        let envelope = match Envelope::decode(payload) {
+        // A record handed back after a backoff comes in below the last one.
+        self.last_offset = self.last_offset.max(Some(offset));
+        let backed_off = self.backing_off.remove(&offset);
+        let envelope = match Envelope::decode(&record.payload) {
             Ok(envelope) => envelope,
             Err(err) => {
                 // Nothing can deliver it, and holding it would stop the endpoint.
@@ -188,17 +222,22 @@ impl Task {
         if !endpoint.wants(offset, envelope.event_type.as_deref()) {
             return Ok(None);
         }
-        let age = polled_at.saturating_sub(envelope.received_at);
-        self.app
-            .metrics
-            .poll_wakeup
-            .record(Duration::from_millis(age));
+        if backed_off.is_none() {
+            let age = polled_at.saturating_sub(envelope.received_at);
+            self.app
+                .metrics
+                .poll_wakeup
+                .record(Duration::from_millis(age));
+        }
+        let (tries, refusals) = backed_off.unwrap_or_default();
+        record.payload = Default::default();
         Ok(Some(Held {
             offset,
+            claim: record,
             id: envelope.event_id(&self.source, offset),
             envelope,
-            tries: 0,
-            refusals: 0,
+            tries,
+            refusals,
         }))
     }
 
@@ -244,6 +283,13 @@ impl Task {
                             .dead_letter(offset, record.envelope, record.tries, answer)
                             .await;
                         self.ack(offset).await;
+                    }
+                    Decision::Retry(after)
+                        if self.mode == Mode::Unordered
+                            && self.nack_after(&record, after).await =>
+                    {
+                        self.backing_off
+                            .insert(record.offset, (record.tries, record.refusals));
                     }
                     Decision::Retry(after) | Decision::Pause(after) => {
                         wait = wait.max(after);
@@ -380,7 +426,45 @@ impl Task {
         self.disabling = true;
     }
 
+    /// Hand `record` back to the group, to come back once `after` has passed,
+    /// so the rest of an unordered window keeps moving. False when it is
+    /// still in hand and the task has to wait it out.
+    async fn nack_after(&self, record: &Held, after: Duration) -> bool {
+        let Some(claims) = &self.claims else {
+            return false;
+        };
+        let felix = &self.tenant.felix;
+        let nacked = self
+            .felix()
+            .group_nack_after(
+                &felix.tenant,
+                &felix.namespace,
+                &self.stream,
+                0,
+                &self.group,
+                &record.claim,
+                after,
+            )
+            .await;
+        match nacked {
+            Ok(()) => {
+                claims.release(record.offset);
+                true
+            }
+            Err(err) => {
+                // A stale claim is owed already and would come straight back.
+                if !claims::is_stale(&err) {
+                    tracing::warn!(offset = record.offset, "nack failed: {err:#}");
+                }
+                false
+            }
+        }
+    }
+
     async fn ack(&self, offset: u64) {
+        if let Some(claims) = &self.claims {
+            claims.release(offset);
+        }
         let felix = &self.tenant.felix;
         while let Err(err) = self
             .felix()
