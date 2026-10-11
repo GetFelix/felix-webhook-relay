@@ -2,6 +2,7 @@
 //! stopped as the endpoints in config change, and the replay and redrive
 //! jobs for those endpoints.
 
+mod claims;
 mod job;
 mod send;
 mod task;

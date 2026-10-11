@@ -392,7 +392,7 @@ group's cursor.
 | `RELAY_ENDPOINT_PREFIXES` | all | Comma-separated; only endpoints whose ids start with one of these |
 | `RELAY_CLAIM_WAIT_MS` | `30000` | Wait before the first poll; at least the broker's `FELIX_GROUP_VISIBILITY_TIMEOUT_MS` |
 | `RELAY_BACKOFF` | `5s,15s,1m,2m,5m` | Waits between probes of a paused endpoint; the last repeats |
-| `RELAY_REFUSED_RETRIES` | `5s,30s` | Waits before each retry of a refused record, then it is dead-lettered |
+| `RELAY_REFUSED_RETRIES` | `5s,30s` | Waits before each retry of a refused record, then it is dead-lettered. Keep the number of entries below the broker's `FELIX_GROUP_MAX_ATTEMPTS` minus one, or Felix gives up on the record first |
 | `RELAY_DISABLE_AFTER` | `72h` | How long an endpoint may fail without a break before it is disabled |
 | `RELAY_WORKER_NAME` | host name and pid | Names this process in endpoint health entries |
 | `RUST_LOG` | `info` | Log filter |

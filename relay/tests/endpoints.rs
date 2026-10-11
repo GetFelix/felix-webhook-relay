@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::{
-    Endpoint, Received, Relay, TENANT, eventually, metric, read_stream, state_entry, unique,
+    Endpoint, Received, Relay, TENANT, eventually, metric, read_stream, state_entry, unique, within,
 };
 use felix_relay_core::catalog::owner;
 use felix_relay_core::records::DeadLetter;
@@ -236,6 +236,63 @@ async fn an_unordered_endpoint_keeps_its_window_in_flight() {
     .await;
     assert_eq!(dead[0].envelope.body, b"poison");
     assert_eq!(dead[0].last_status, Some(503));
+}
+
+#[tokio::test]
+#[ignore = "needs a Felix broker"]
+async fn an_unordered_endpoint_delivers_past_a_record_waiting_to_retry() {
+    let run = unique("nack");
+    let refused = Arc::new(AtomicUsize::new(0));
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = axum::Router::new().route(
+        "/hook",
+        axum::routing::post({
+            let (refused, delivered) = (Arc::clone(&refused), Arc::clone(&delivered));
+            move |body: axum::body::Bytes| async move {
+                if body.starts_with(b"first") && refused.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return StatusCode::BAD_REQUEST;
+                }
+                delivered.lock().unwrap().push(body.to_vec());
+                StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    let relay = Relay::start(
+        "intake,deliver,admin",
+        &[
+            ("RELAY_ENDPOINT_PREFIXES", &run),
+            ("RELAY_REFUSED_RETRIES", "10s"),
+        ],
+    )
+    .await;
+    let path = source(&relay, &run, json!({})).await;
+    endpoint(
+        &relay,
+        &run,
+        json!({ "source": run, "url": url, "mode": "unordered" }),
+    )
+    .await;
+    send(&relay, &path, &["first"], &[]).await;
+    eventually("the first refusal", async || {
+        (refused.load(Ordering::SeqCst) == 1).then_some(())
+    })
+    .await;
+
+    send(&relay, &path, &["second"], &[]).await;
+    within(Duration::from_secs(5), "the second webhook", async || {
+        (*delivered.lock().unwrap() == [b"second".to_vec()]).then_some(())
+    })
+    .await;
+    eventually("the first webhook, retried", async || {
+        (delivered.lock().unwrap().len() == 2).then_some(())
+    })
+    .await;
+    assert_eq!(delivered.lock().unwrap()[1], b"first");
+    assert_eq!(refused.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
