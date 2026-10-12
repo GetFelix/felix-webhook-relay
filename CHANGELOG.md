@@ -4,7 +4,7 @@ Each release's section is its GitHub release notes.
 
 ## Unreleased
 
-- Built on Felix 0.6.0-preview.4: the client crates, the compose files' and
+- Built on Felix 0.6.0-preview.7: the client crates, the compose files' and
   CI's images, and the Felix chart the self-hosting guide installs.
 - A delivery worker extends the claims of records it is still retrying, so a
   long retry no longer leaves its record owed to the group. An unordered
