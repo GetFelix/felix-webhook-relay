@@ -4,6 +4,8 @@ Each release's section is its GitHub release notes.
 
 ## Unreleased
 
+## [0.2.0]
+
 - rustls 0.23.46, which fixes RUSTSEC-2026-0346 to 0349 (TLS secrets in `Debug` output, a ServerHello downgrade to classical key exchange, ECH rejection, and unbounded brotli certificate decompression).
 - Built on Felix 0.6.0-preview.7: the client crates, the compose files' and
   CI's images, and the Felix chart the self-hosting guide installs.
