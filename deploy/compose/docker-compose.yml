@@ -52,7 +52,7 @@ services:
   # exchange for an IdP token (felix#954), so this signs the relay's service
   # accounts in itself. It has no published port.
   tokens:
-    image: ghcr.io/getfelix/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
+    image: ghcr.io/getfelix/felix-webhook-relay:${RELAY_VERSION:-0.2.0}
     entrypoint: ["relay-seed", "serve"]
     # Root, to write the state volume, which Docker creates owned by root.
     user: "0:0"
@@ -114,7 +114,7 @@ services:
     restart: unless-stopped
 
   relay:
-    image: ghcr.io/getfelix/felix-webhook-relay:${RELAY_VERSION:-0.1.0}
+    image: ghcr.io/getfelix/felix-webhook-relay:${RELAY_VERSION:-0.2.0}
     environment:
       RELAY_SECRET_KEY: ${RELAY_SECRET_KEY:?set RELAY_SECRET_KEY in .env}
       RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL}
