@@ -4,7 +4,7 @@ Each release's section is its GitHub release notes.
 
 ## Unreleased
 
-- Built on Felix 0.6.0-preview.9: the client crates, the compose files and CI.
+- Built on Felix 0.6.0: the client crates, the compose files and CI.
 
 ## [0.2.0]
 
