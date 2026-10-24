@@ -1,0 +1,11 @@
+# The Felix release this repo is built on. GetFelix/felix's release workflow
+# tells .github/workflows/felix-release.yml about each new release, which runs
+# .github/felix-bump.sh and opens the bump PR. See README.md, "Felix version".
+version=0.6.1
+# Directories whose Cargo.lock is regenerated, and the Felix crates locked there.
+cargo_dirs=.
+cargo_crates=felix-client felix-wire felix-transport
+# Directories whose package-lock.json is regenerated (none here).
+npm_dirs=
+# Also open bump PRs for prereleases such as 0.7.0-preview.1.
+prerelease=false
