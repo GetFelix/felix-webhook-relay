@@ -285,7 +285,7 @@ upgrades to three delivery workers.
    database, and the broker settings above.
 
    ```bash
-   git clone --depth 1 --branch v0.6.0 https://github.com/GetFelix/felix
+   git clone --depth 1 --branch v0.6.1 https://github.com/GetFelix/felix
    helm install felix felix/deploy/helm/felix -f felix-values.yaml
    ```
 
