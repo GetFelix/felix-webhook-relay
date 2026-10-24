@@ -29,6 +29,6 @@ jobs:
     uses: GetFelix/.github/.github/workflows/felix-bump.yml@main
     with:
       version: ${{ github.event.client_payload.version || inputs.version }}
-      prerelease: ${{ github.event.client_payload.prerelease == true || inputs.prerelease == true }}
+      prerelease: ${{ github.event.client_payload.prerelease == true || github.event.client_payload.prerelease == 'true' || inputs.prerelease == true }}
       test_pr: ${{ inputs.test_pr == true }}
     secrets: inherit
