@@ -70,7 +70,7 @@ and cache on three of them ([docs/self-hosting.md](docs/self-hosting.md)).
 ## Quick start
 
 You need Docker or Podman, with Compose 2.20 or later. The compose install
-runs the relay with a Felix broker and control plane and nothing else, plus
+runs the relay with a Felix 0.6.1 broker and control plane and nothing else, plus
 Dex as a stand-in sign-in for a first run:
 
 ```bash
