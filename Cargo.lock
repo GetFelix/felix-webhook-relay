@@ -437,9 +437,9 @@ dependencies = [
 
 [[package]]
 name = "felix-client"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4a2ad323cf6a01bfa84f2f0aa4531504f1bfd0912b5d2e8c9305a9da072cb6c"
+checksum = "0739ed5e2c81f76a5a3b485ae2a798eedfdf257cb1a90b394567c4c17efb65d8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -457,6 +457,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -502,9 +503,9 @@ dependencies = [
 
 [[package]]
 name = "felix-transport"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0b0a5b52fe9691dfa0b26d571ea2688e545a0a4ceb110af42b97f1c0709bb13"
+checksum = "17ab814fec5ef7428c56aa1c0ae98686b3fe11b0700938f7c91882bb913c884b"
 dependencies = [
  "anyhow",
  "libc",
@@ -518,9 +519,9 @@ dependencies = [
 
 [[package]]
 name = "felix-wire"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75820d4cc00254bda4b2d7a65f26ea57907ccbfea4376bd1df35d8ca7d5fb4b9"
+checksum = "3554c445295d9a0181a1dc0bd4c94f4693073545e329583cd95c4edc83db9776"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -582,6 +583,12 @@ dependencies = [
  "quote",
  "syn 3.0.6",
 ]
+
+[[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 
 [[package]]
 name = "futures-task"
@@ -1887,6 +1894,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "pin-project-lite",
  "tokio",
 ]
 
