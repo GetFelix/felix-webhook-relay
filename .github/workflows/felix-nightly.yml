@@ -1,0 +1,22 @@
+# Runs the integration tests against Felix main every night, after Felix's own
+# nightly build. A failure opens (or updates) an issue labelled felix-nightly;
+# a green run closes it. The steps are in GetFelix/.github, and the repo's part
+# is .github/felix-nightly.sh.
+name: Felix nightly
+
+on:
+  schedule:
+    - cron: "7 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nightly:
+    permissions:
+      contents: read
+      issues: write
+    uses: GetFelix/.github/.github/workflows/felix-nightly.yml@main
+    with:
+      timeout_minutes: 60
