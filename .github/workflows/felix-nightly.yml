@@ -8,6 +8,8 @@ on:
   schedule:
     - cron: "7 7 * * *"
   workflow_dispatch:
+  push:
+    branches: [ci/felix-nightly]
 
 permissions:
   contents: read
