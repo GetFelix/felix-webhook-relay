@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use felix_client::{ClientConfig, Client, IdempotentProducer, StartPosition, TokenProvider};
+use felix_client::{Client, ClientConfig, IdempotentProducer, StartPosition, TokenProvider};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;

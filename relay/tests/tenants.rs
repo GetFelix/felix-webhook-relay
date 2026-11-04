@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::{ALICE, DEX, Endpoint, Relay, SECRET_KEY, TENANT, eventually, id_token, unique};
-use felix_client::{ClientConfig, Client, StartPosition};
+use felix_client::{Client, ClientConfig, StartPosition};
 use reqwest::Method;
 use reqwest::header::{COOKIE, LOCATION, SET_COOKIE};
 use rustls::RootCertStore;
@@ -50,10 +50,7 @@ async fn felix_with(token: &str) -> Arc<Client> {
 
 /// Everything a relay process does with Felix, tried on one tenant's
 /// objects. Each entry is the call and whether it worked.
-async fn attempt_everything(
-    client: &Arc<Client>,
-    tenant: &str,
-) -> Vec<(&'static str, bool)> {
+async fn attempt_everything(client: &Arc<Client>, tenant: &str) -> Vec<(&'static str, bool)> {
     let cache = client.client().await;
     vec![
         (

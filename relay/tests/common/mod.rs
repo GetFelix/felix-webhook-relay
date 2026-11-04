@@ -14,7 +14,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
-use felix_client::{ClientConfig, Client, StartPosition};
+use felix_client::{Client, ClientConfig, StartPosition};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
