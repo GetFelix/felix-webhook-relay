@@ -2,9 +2,7 @@
 
 Each release's section is its GitHub release notes.
 
-## Unreleased
-
-- Built on Felix 0.6.2: the client crates, the compose files, CI and the Felix chart the self-hosting guide installs.
+## [Unreleased]
 
 ## [0.2.0]
 
