@@ -14,7 +14,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
-use felix_client::{ClientConfig, ClusterClient, StartPosition};
+use felix_client::{ClientConfig, Client, StartPosition};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -365,7 +365,7 @@ fn state_dir() -> PathBuf {
 }
 
 /// A client on the development broker with the relay's token.
-pub async fn felix() -> Arc<ClusterClient> {
+pub async fn felix() -> Arc<Client> {
     let ca = std::env::var("RELAY_FELIX_CA_FILE").expect("RELAY_FELIX_CA_FILE");
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_file_iter(&ca).unwrap() {
@@ -378,7 +378,7 @@ pub async fn felix() -> Arc<ClusterClient> {
     config.auth_token = Some(token.trim().to_string());
     let brokers = ["127.0.0.1:5000".parse().unwrap()];
     Arc::new(
-        ClusterClient::connect(&brokers, "localhost", config)
+        Client::connect(&brokers, "localhost", config)
             .await
             .unwrap(),
     )

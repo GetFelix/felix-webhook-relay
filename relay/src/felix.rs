@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use felix_client::{ClientConfig, ClusterClient, IdempotentProducer, StartPosition, TokenProvider};
+use felix_client::{ClientConfig, Client, IdempotentProducer, StartPosition, TokenProvider};
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
@@ -28,13 +28,13 @@ const READS_PER_CONNECTION: usize = 400;
 const GROUP_CONNECTIONS: usize = 4;
 
 pub(crate) struct Felix {
-    client: Arc<ClusterClient>,
-    groups: Vec<Arc<ClusterClient>>,
+    client: Arc<Client>,
+    groups: Vec<Arc<Client>>,
     /// The connection short reads go through: tails, single records, ranges.
     /// A dropped Felix subscription keeps its stream until the broker next
     /// writes to it, which on a quiet stream is never, so this connection is
     /// replaced every few hundred subscriptions and dropping it frees them.
-    reads: tokio::sync::Mutex<(Arc<ClusterClient>, usize)>,
+    reads: tokio::sync::Mutex<(Arc<Client>, usize)>,
     config: Config,
     tokens: Arc<dyn TokenProvider>,
     /// The Felix tenant and the namespace every stream, group and cache lives in.
@@ -75,7 +75,7 @@ impl Felix {
     }
 
     /// The reads connection, counting the `subscriptions` the caller opens.
-    async fn reader(&self, subscriptions: usize) -> Result<Arc<ClusterClient>> {
+    async fn reader(&self, subscriptions: usize) -> Result<Arc<Client>> {
         let mut reads = self.reads.lock().await;
         if reads.1 + subscriptions > READS_PER_CONNECTION {
             *reads = (
@@ -87,12 +87,12 @@ impl Felix {
         Ok(Arc::clone(&reads.0))
     }
 
-    pub(crate) fn client(&self) -> &Arc<ClusterClient> {
+    pub(crate) fn client(&self) -> &Arc<Client> {
         &self.client
     }
 
     /// The connection one endpoint's group traffic goes through.
-    pub(crate) fn group_client(&self, endpoint: &str) -> &ClusterClient {
+    pub(crate) fn group_client(&self, endpoint: &str) -> &Client {
         let index = felix_relay_core::catalog::owner(endpoint, GROUP_CONNECTIONS as u32);
         &self.groups[index as usize]
     }
@@ -266,7 +266,7 @@ struct Pending {
 /// Take appends as they come and publish what has gathered, per stream, in
 /// arrival order.
 async fn appender(
-    client: Arc<ClusterClient>,
+    client: Arc<Client>,
     tenant: String,
     namespace: String,
     mut appends: mpsc::Receiver<Pending>,
@@ -315,7 +315,7 @@ async fn appender(
 /// Publish one batch, re-sending it a few times, and return its first offset.
 /// The records of a batch land together, at consecutive offsets.
 async fn publish_batch(
-    client: &Arc<ClusterClient>,
+    client: &Arc<Client>,
     producer: &mut Option<IdempotentProducer>,
     tenant: &str,
     namespace: &str,
@@ -354,7 +354,7 @@ async fn publish_batch(
 }
 
 /// A connection to the brokers with the configured trust and tokens.
-async fn open(config: &Config, tokens: Arc<dyn TokenProvider>) -> Result<ClusterClient> {
+async fn open(config: &Config, tokens: Arc<dyn TokenProvider>) -> Result<Client> {
     let roots = match &config.ca_file {
         Some(path) => {
             let mut roots = RootCertStore::empty();
@@ -379,7 +379,7 @@ async fn open(config: &Config, tokens: Arc<dyn TokenProvider>) -> Result<Cluster
                 .with_context(|| format!("resolve broker {broker}"))?,
         );
     }
-    ClusterClient::connect(&brokers, &config.server_name, client_config)
+    Client::connect(&brokers, &config.server_name, client_config)
         .await
         .context("connect to Felix")
 }
