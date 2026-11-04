@@ -37,6 +37,10 @@ milestone plan are in [docs/design.md](docs/design.md).
 
 - One pull request per milestone, closing that milestone's issues.
 - CI must pass before review.
+- Record anything a user or an operator would notice as a fragment in `changelog.d/`
+  (`<name>.<section>.md`, see [changelog.d/README.md](changelog.d/README.md)). Never edit
+  `CHANGELOG.md` directly: fragments are merged into it at release time, so pull requests
+  don't conflict on the changelog.
 - No AI attribution in commits or pull request descriptions.
 - List any design calls under "Review notes", and any Felix gaps you hit under
   "Felix gaps found", with the Felix issue each one is filed as.
@@ -53,7 +57,8 @@ closes its issues. When Felix gets in the way, file an issue on
 
 Bump the version in `core/Cargo.toml`, `relay/Cargo.toml`, the chart's
 `version` and `appVersion`, and the compose file's `RELAY_VERSION` defaults,
-and add the version's section to `CHANGELOG.md`. A `v<version>` tag then runs
+and run `python3 .github/scripts/changelog-assemble.py <version>` to add the version's section to
+`CHANGELOG.md` from the fragments. A `v<version>` tag then runs
 `.github/workflows/release.yml`, which refuses a tag that disagrees with any
 of them (`scripts/release-notes.sh` is the check). Rehearse first by running
 the workflow by hand with `dry_run`, and `ref` set to the branch.

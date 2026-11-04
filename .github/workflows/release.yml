@@ -64,6 +64,18 @@ jobs:
             *) echo "::error::${TAG} is not a v<version> tag"; exit 1 ;;
           esac
 
+      # Fragments left behind mean the assembler was not run, so their entries
+      # are missing from the notes. A dry run carries fragments of its own.
+      - name: Changelog fragments are assembled
+        if: ${{ !inputs.dry_run }}
+        run: |
+          left=$(find changelog.d -maxdepth 1 -type f ! -name README.md ! -name '.*' 2>/dev/null || true)
+          if [ -n "$left" ]; then
+            echo "::error::changelog.d/ still has fragments; run .github/scripts/changelog-assemble.py ${TAG#v} and commit the result before tagging"
+            echo "$left"
+            exit 1
+          fi
+
       # Before anything is published, because after that the tag is permanent.
       - name: The tag matches every version in the tree, and CHANGELOG.md has its notes
         run: scripts/release-notes.sh "$TAG" > release-notes.md && cat release-notes.md

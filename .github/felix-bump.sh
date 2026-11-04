@@ -22,44 +22,11 @@ pin() {
     || die "$file: expected '${pattern//'{V}'/$OLD}'"
 }
 
-# changelog_entry HEADING SUBSECTION PREFIX TEXT: in the unreleased section,
-# replace the bullet that starts with PREFIX by "- TEXT", or add it under
-# SUBSECTION (or at the top when SUBSECTION is empty). Released sections are
-# never touched.
-changelog_entry() {
-  python3 - CHANGELOG.md "$@" <<'PY'
-import re, sys
-path, heading, sub, prefix, text = sys.argv[1:]
-lines = open(path).read().split("\n")
-bullet = ["- " + text]
-start = next((i for i, l in enumerate(lines) if re.match(r"## \[?Unreleased\]?\s*$", l)), None)
-if start is None:
-    first = next((i for i, l in enumerate(lines) if l.startswith("## ")), len(lines))
-    lines[first:first] = [heading, ""]
-    start = first
-end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
-hit = next((i for i in range(start + 1, end) if lines[i].startswith("- " + prefix)), None)
-if hit is not None:
-    stop = hit + 1
-    while stop < end and lines[stop].startswith("  "):
-        stop += 1
-    lines[hit:stop] = bullet
-else:
-    anchor = start
-    if sub:
-        anchor = next((i for i in range(start + 1, end) if lines[i] == sub), None)
-        if anchor is None:
-            lines[start + 1:start + 1] = ["", sub]
-            anchor, end = start + 2, end + 2
-    # Put the bullet first under the anchor heading, one blank line below it.
-    j = anchor + 1
-    while j < end and lines[j].strip() == "":
-        j += 1
-    tail = [] if j < end and lines[j].startswith("- ") else [""]
-    lines[anchor + 1:j] = [""] + bullet + tail
-out = "\n".join(lines)
-open(path, "w").write(out)
-PY
+# changelog_fragment TEXT: write the bump's changelog bullet as a fixed-name
+# fragment, so repeated bumps before a release overwrite one file.
+changelog_fragment() {
+  mkdir -p changelog.d
+  printf -- '- %s\n' "$1" > changelog.d/felix-version.changed.md
 }
 
 pin relay/Cargo.toml 'felix-client = "{V}"'
@@ -71,5 +38,4 @@ pin deploy/compose/docker-compose.yml 'ghcr.io/getfelix/felix-broker:${FELIX_VER
 pin .github/workflows/images.yml 'FELIX_CHART_REF: v{V}'
 pin README.md 'a Felix {V} broker'
 pin docs/self-hosting.md '--branch v{V} https://github.com/GetFelix/felix'
-changelog_entry '## Unreleased' '' 'Built on Felix ' \
-  "Built on Felix $NEW: the client crates, the compose files, CI and the Felix chart the self-hosting guide installs."
+changelog_fragment "Built on Felix $NEW: the client crates, the compose files, CI and the Felix chart the self-hosting guide installs."
