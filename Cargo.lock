@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "felix-relay"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "felix-relay-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",

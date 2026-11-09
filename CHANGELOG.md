@@ -4,7 +4,12 @@ Each release's section is its GitHub release notes.
 
 ## Unreleased
 
-- Built on Felix 0.6.2: the client crates, the compose files, CI and the Felix chart the self-hosting guide installs.
+## [0.3.0] - 2026-11-09
+
+This release uses Felix 0.7.0 and needs a Felix 0.7 broker and control plane.
+
+### Changed
+- Built on Felix 0.7.0: the client crates, the compose files, CI and the Felix chart the self-hosting guide installs.
 
 ## [0.2.0]
 
