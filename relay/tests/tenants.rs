@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::{ALICE, DEX, Endpoint, Relay, SECRET_KEY, TENANT, eventually, id_token, unique};
-use felix_client::{ClientConfig, ClusterClient, StartPosition};
+use felix_client::{Client, ClientConfig, StartPosition};
 use reqwest::Method;
 use reqwest::header::{COOKIE, LOCATION, SET_COOKIE};
 use rustls::RootCertStore;
@@ -31,7 +31,7 @@ fn state_file(name: &str) -> String {
 }
 
 /// A client on the dev broker that connects with `token`.
-async fn felix_with(token: &str) -> Arc<ClusterClient> {
+async fn felix_with(token: &str) -> Arc<Client> {
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_file_iter(state_file("broker-cert.pem")).unwrap() {
         roots.add(cert.unwrap()).unwrap();
@@ -42,7 +42,7 @@ async fn felix_with(token: &str) -> Arc<ClusterClient> {
     config.auth_token = Some(token.to_string());
     let brokers = ["127.0.0.1:5000".parse().unwrap()];
     Arc::new(
-        ClusterClient::connect(&brokers, "localhost", config)
+        Client::connect(&brokers, "localhost", config)
             .await
             .unwrap(),
     )
@@ -50,10 +50,7 @@ async fn felix_with(token: &str) -> Arc<ClusterClient> {
 
 /// Everything a relay process does with Felix, tried on one tenant's
 /// objects. Each entry is the call and whether it worked.
-async fn attempt_everything(
-    client: &Arc<ClusterClient>,
-    tenant: &str,
-) -> Vec<(&'static str, bool)> {
+async fn attempt_everything(client: &Arc<Client>, tenant: &str) -> Vec<(&'static str, bool)> {
     let cache = client.client().await;
     vec![
         (

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use felix_client::ClusterClient;
+use felix_client::Client;
 use felix_relay_core::Envelope;
 use felix_relay_core::catalog::{Disabled, Endpoint, Mode, endpoint_key};
 use felix_relay_core::health::{Decision, Health, Outcome, State};
@@ -105,7 +105,7 @@ impl Task {
         }
     }
 
-    fn felix(&self) -> &ClusterClient {
+    fn felix(&self) -> &Client {
         self.tenant.felix.group_client(&self.endpoint)
     }
 
