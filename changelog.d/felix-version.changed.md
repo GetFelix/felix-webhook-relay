@@ -1,1 +1,1 @@
-- Built on Felix 0.7.1: the client crates, the compose files, CI and the Felix chart the self-hosting guide installs.
+- Built on Felix 0.7.2: the client crates, the compose files, CI and the Felix chart the self-hosting guide installs.
