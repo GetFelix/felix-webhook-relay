@@ -8,6 +8,24 @@
   A self-hosted webhook relay built on <a href="https://github.com/GetFelix/felix">Felix</a>.
 </p>
 
+<p align="center">
+  <a href="https://github.com/GetFelix/felix-webhook-relay/actions/workflows/ci.yml">
+    <img src="https://github.com/GetFelix/felix-webhook-relay/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI" />
+  </a>
+  <a href="https://github.com/GetFelix/felix-webhook-relay/releases">
+    <img src="https://img.shields.io/github/v/release/GetFelix/felix-webhook-relay?sort=semver&label=release" alt="Latest release" />
+  </a>
+  <a href="https://github.com/GetFelix/felix-webhook-relay/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT" />
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/rust%20min-1.97-blue" alt="Minimum supported Rust 1.97" />
+  </a>
+  <a href="https://github.com/GetFelix/felix-webhook-relay/blob/main/rust-toolchain.toml">
+    <img src="https://img.shields.io/badge/rust%20built%20with-1.97-blue" alt="Built and tested with Rust 1.97" />
+  </a>
+</p>
+
 Felix Webhook Relay sits between the services that send you webhooks and the
 endpoints that handle them. It verifies each incoming webhook's signature,
 stores it durably before answering the sender, and delivers it to each of your
